@@ -300,5 +300,8 @@ class ServicesManager:
 
         logger.info("Shutting down: stopping services...")
         tasks = [asyncio.create_task(stop_service(service_id, service)) for service_id, service in self.services.items()]
-        await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                logger.error("Unexpected error while stopping services", exc_info=result)
         logger.info("All services stopped")
