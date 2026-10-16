@@ -14,7 +14,6 @@ instance lists (and can delete) adapters trained by any other one. Uploaded trai
 configs and the job database are per instance.
 """
 
-import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any
@@ -51,8 +50,6 @@ from server.serviceprovider import ServiceRawConfig
 from server.services.base2_service import Base2Service, CustomModel, Instance, InstanceConfig
 from server.services_manager import ServicesManager
 from server.utils.core import PromiseWithProgress, Stream, StreamChunk, StreamChunkProgress, Utils, try_parse_pydantic
-
-logger = logging.getLogger("uvicorn.error")
 
 _FINETUNE_MODEL_ID = "deepfellow-finetune"
 _FINETUNE_IMAGE = f"hub.simplito.com/deepfellow/{_FINETUNE_MODEL_ID}:0.0.20"
