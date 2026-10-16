@@ -12,6 +12,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - API responses now forbid caching (`Cache-Control: no-store`, `Pragma`, `Expires`). WebUI files are sent with `Cache-Control: no-cache`.
 
 ### Changed
+
+- Removed unused loggers from the Finetune modules.
 - MR templates (`feature`, `bug`) follow the team-approved version (DFMAIN-56)
 
 ## [0.35.0] - 2026-10-15

@@ -3,15 +3,12 @@
 
 """Finetune API."""
 
-import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
 from server.core.dependencies import auth_admin
 from server.services.finetune_service import FinetuneAdapterListOut, FinetuneService, get_finetune_service_instance
-
-logger = logging.getLogger("uvicorn.error")
 
 router = APIRouter(prefix="/admin/services/{service_id}/adapters", tags=["Finetune"])
 
