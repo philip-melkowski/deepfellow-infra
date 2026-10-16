@@ -11,7 +11,8 @@ from fastapi import FastAPI
 from starlette.exceptions import HTTPException
 from starlette.testclient import TestClient
 
-from server.api.fallback import StaticFilesHandler
+from server.api.fallback import STATIC_CACHE_CONTROL, StaticFilesHandler
+from server.utils.security_headers import SecurityHeadersMiddleware
 
 
 def _make_app(static_dir: str) -> FastAPI:
@@ -29,6 +30,21 @@ def test_static_files_handler_serves_existing_file(tmp_path: Path) -> None:
 
     assert resp.status_code == 200
     assert resp.text == "world"
+    assert resp.headers["Cache-Control"] == STATIC_CACHE_CONTROL
+
+
+def test_static_files_handler_keeps_its_cache_control_behind_security_headers_middleware(tmp_path: Path) -> None:
+    (tmp_path / "index.html").write_text("<html/>")
+    app = _make_app(str(tmp_path))
+    app.add_middleware(SecurityHeadersMiddleware)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        resp = client.get("/")
+
+    assert resp.headers["Cache-Control"] == STATIC_CACHE_CONTROL
+    assert "Pragma" not in resp.headers
+    assert "Expires" not in resp.headers
+    assert resp.headers["X-Frame-Options"] == "DENY"
 
 
 def test_static_files_handler_serves_index_html_for_unknown_path(tmp_path: Path) -> None:
@@ -39,6 +55,8 @@ def test_static_files_handler_serves_index_html_for_unknown_path(tmp_path: Path)
 
     # SPA routing: 404 is caught and index.html is returned with 200
     assert resp.status_code == 200
+    assert resp.text == "<html>spa</html>"
+    assert resp.headers["Cache-Control"] == STATIC_CACHE_CONTROL
 
 
 def test_static_files_handler_serves_index_html_for_missing_file(tmp_path: Path) -> None:

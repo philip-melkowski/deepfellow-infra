@@ -13,6 +13,7 @@ from starlette.exceptions import HTTPException
 
 from server.utils.failed_span import get_failed_span_context
 from server.utils.logger import logger
+from server.utils.security_headers import add_security_headers
 from server.utils.sentry import capture_exception
 
 ERROR_ID_HEADER = "X-Error-Id"
@@ -83,7 +84,10 @@ async def handle_unhandled_exception(request: Request, exc: Exception) -> JSONRe
     capture_exception(exc, error_id=error_id, handled=False, span_context=span_context)
 
     body = build_error_body(f"Internal server error. Error ID: {error_id}", "api_error")
-    return JSONResponse(status_code=500, content=body, headers={ERROR_ID_HEADER: error_id})
+    response = JSONResponse(status_code=500, content=body, headers={ERROR_ID_HEADER: error_id})
+    # This handler runs in ServerErrorMiddleware, outside SecurityHeadersMiddleware.
+    add_security_headers(response.headers, request.scope)
+    return response
 
 
 def register_exception_handlers(app: FastAPI) -> None:

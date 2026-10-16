@@ -9,9 +9,11 @@ from server.api import config, finetune, mcp, mcp_oauth, mesh, metrics, models, 
 from server.api.fallback import StaticFilesHandler
 from server.error_handlers import register_exception_handlers
 from server.lifecycle import lifespan
+from server.utils.security_headers import SecurityHeadersMiddleware
 from server.websockets import api as websocket
 
 app = FastAPI(lifespan=lifespan)
+app.add_middleware(SecurityHeadersMiddleware)
 register_exception_handlers(app)
 app.include_router(services.router)
 app.include_router(settings.router)
