@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Added
+
+- Every HTTP response now carries security headers (`Content-Security-Policy`, `Referrer-Policy`, `X-Content-Type-Options`, `X-Frame-Options`, and `Strict-Transport-Security`).
+- API responses now forbid caching (`Cache-Control: no-store`, `Pragma`, `Expires`). WebUI files are sent with `Cache-Control: no-cache`.
+
 ## [0.35.0] - 2026-10-15
 
 ### Added

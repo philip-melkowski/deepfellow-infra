@@ -23,6 +23,7 @@ from server.error_handlers import (
     register_exception_handlers,
 )
 from server.utils.failed_span import remember_failed_span
+from server.utils.security_headers import CACHE_CONTROL, CONTENT_SECURITY_POLICY
 
 TRACE_ID = 0x0AF7651916CD43DD8448EB211C80319C
 SPAN_ID = 0x00F067AA0BA902B7
@@ -143,6 +144,16 @@ def test_handle_unhandled_exception_hides_exception_details(client: TestClient):
     assert "secret internal detail" not in resp.text
     assert "RuntimeError" not in resp.text
     assert all("secret internal detail" not in value for value in resp.headers.values())
+
+
+def test_handle_unhandled_exception_adds_security_headers(client: TestClient):
+    resp = client.get("/boom")
+
+    assert resp.headers["Content-Security-Policy"] == CONTENT_SECURITY_POLICY
+    assert resp.headers["X-Frame-Options"] == "DENY"
+    assert resp.headers["X-Content-Type-Options"] == "nosniff"
+    assert resp.headers["Cache-Control"] == CACHE_CONTROL
+    assert resp.headers["Pragma"] == "no-cache"
 
 
 def test_handle_unhandled_exception_generates_new_error_id_per_failure(client: TestClient):
