@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `just dev` no longer keeps a CPU core busy watching for file changes: `watchfiles` is now a dev dependency, so uvicorn's auto-reload uses it instead of constantly polling the file system.
+
 ### Added
 
 - Every HTTP response now carries security headers (`Content-Security-Policy`, `Referrer-Policy`, `X-Content-Type-Options`, `X-Frame-Options`, and `Strict-Transport-Security`).
