@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Simplito sp. z o.o.
 
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock, Mock, call
 
 import pytest
 from fastapi import HTTPException
@@ -695,6 +695,20 @@ async def test_stop_all_services_continues_on_error(services_manager: ServicesMa
 
     assert svc_b.stop_instance.await_count == 1
     assert svc_b.stop_instance.await_args == call("default")
+
+
+@pytest.mark.asyncio
+async def test_stop_all_services_waits_for_other_services_when_one_task_raises(services_manager: ServicesManager):
+    svc_a = FakeService("svc-a", installed=True)
+    svc_b = FakeService("svc-b", installed=True)
+    svc_a.is_installed = Mock(side_effect=RuntimeError("boom"))
+    svc_b.stop_instance = AsyncMock()
+    services_manager.register_service(svc_a)
+    services_manager.register_service(svc_b)
+
+    await services_manager.stop_all_services()
+
+    assert svc_b.stop_instance.await_count == 1
 
 
 @pytest.mark.asyncio

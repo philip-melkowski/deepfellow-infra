@@ -7,7 +7,7 @@ import asyncio
 import os
 import re
 import subprocess
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -143,12 +143,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     yield
     # Shutdown: stop all services gracefully if enabled
     logger.debug("Shutdown all containers gracefully")
-    await services_manager.drain_warning_tasks()
+    shutdown_steps: list[tuple[str, Callable[[], Awaitable[None]]]] = [("drain warning tasks", services_manager.drain_warning_tasks)]
     if config.is_stop_containers_on_shutdown_enabled():
-        await services_manager.stop_all_services()
-    await tracer.shutdown()
-    await otlp_logging.teardown()
-    await sentry.shutdown()
+        shutdown_steps.append(("stop services", services_manager.stop_all_services))
+    shutdown_steps += [("tracer", tracer.shutdown), ("OTLP logging", otlp_logging.teardown), ("Sentry", sentry.shutdown)]
+    # Each step is isolated so one failure doesn't skip the teardown of the remaining services.
+    for name, step in shutdown_steps:
+        try:
+            await step()
+        except Exception:
+            logger.exception("Shutdown step '%s' failed, continuing", name)
 
 
 def check_subnet(subnet: str) -> None:

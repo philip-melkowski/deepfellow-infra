@@ -14,6 +14,7 @@ from pydantic import SecretStr
 
 from server.config import ConfigError
 from server.lifecycle import check_subnet, lifespan
+from server.lifecycle import logger as lifecycle_logger
 from server.utils.exceptions import AppStartError
 from server.utils.sentry import SentryManager
 
@@ -157,7 +158,11 @@ def app() -> FastAPI:
 @pytest.fixture
 def base_mocks() -> Generator[dict[str, Mock]]:
     with ExitStack() as stack:
-        yield {t: stack.enter_context(patch(t)) for t in _BASE_PATCHES}
+        mocks = {t: stack.enter_context(patch(t)) for t in _BASE_PATCHES}
+        mocks["logger.exception"] = stack.enter_context(patch.object(lifecycle_logger, "exception"))
+        yield mocks
+        # A guarded shutdown step swallows its error, so make a silently failing step fail the test.
+        assert mocks["logger.exception"].call_count == 0
 
 
 @pytest.mark.asyncio
@@ -209,6 +214,27 @@ async def test_lifespan_tears_down_otlp_logging_on_exit(app: FastAPI, base_mocks
 
     otlp_logging = base_mocks["server.lifecycle.OtlpLoggingManager"].return_value
     assert otlp_logging.teardown.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_lifespan_shutdown_continues_after_a_step_fails(app: FastAPI, base_mocks: dict[str, Mock]) -> None:
+    cfg = _make_config()
+    _apply_base_patches(base_mocks, config=cfg)
+    otlp_logging = base_mocks["server.lifecycle.OtlpLoggingManager"].return_value
+    otlp_logging.teardown = AsyncMock(side_effect=RuntimeError("boom"))
+    sentry = base_mocks["server.lifecycle.sentry"]
+
+    with patch("server.lifecycle.tracer") as mock_tracer:
+        mock_tracer.shutdown = AsyncMock()
+        async with lifespan(app):
+            pass
+
+        assert mock_tracer.shutdown.call_count == 1
+    assert otlp_logging.teardown.call_count == 1
+    assert sentry.shutdown.call_count == 1
+    log_exception = base_mocks["logger.exception"]
+    assert log_exception.call_args_list == [call("Shutdown step '%s' failed, continuing", "OTLP logging")]
+    log_exception.reset_mock()
 
 
 @pytest.mark.asyncio
