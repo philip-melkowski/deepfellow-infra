@@ -332,3 +332,38 @@ async def test_handler_returns_client_errors_of_small_model_unchanged(svc: Route
     assert response.status_code == 400
     assert response.headers["X-Router-Model"] == "small"
     assert registry.execute_chat_completion.await_count == 1
+
+
+def _heuristics_file(tmp_path: Path) -> str:
+    path = tmp_path / "l1.json"
+    path.write_text(json.dumps({"complex_phrases": ["prove"], "simple_phrases": ["what is"]}), encoding="utf-8")
+    return str(path)
+
+
+@pytest.mark.asyncio
+async def test_install_instance_loads_heuristics(svc: RouterService, index_path: str, tmp_path: Path) -> None:
+    info = await _installed(svc, index_path, heuristics_path=_heuristics_file(tmp_path), heuristic_threshold="1")
+    assert info.parsed_options.heuristics_path is not None
+    assert info.parsed_options.heuristic_threshold == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_install_instance_rejects_missing_heuristics(svc: RouterService, index_path: str, tmp_path: Path) -> None:
+    with pytest.raises(HTTPException, match="Cannot load the router heuristics") as e:
+        await svc._install_instance("default", _spec(index_path, heuristics_path=str(tmp_path / "nope.json")))  # pyright: ignore[reportPrivateUsage]
+    assert e.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_handler_sends_prompt_over_heuristic_threshold_to_large_without_embedding(
+    svc: RouterService, registry: MagicMock, index_path: str, tmp_path: Path
+) -> None:
+    await _installed(svc, index_path, heuristics_path=_heuristics_file(tmp_path), heuristic_threshold="1")
+    await (await svc._install_model("default", ROUTER_MODEL_ID, InstallModelIn(spec={}))).wait()  # pyright: ignore[reportPrivateUsage]
+    registry.execute_embeddings = AsyncMock()
+    registry.execute_chat_completion = AsyncMock(side_effect=_echo_model)
+    handler = registry.register_chat_completion.call_args.kwargs["endpoint"].on_chat_completion
+    response = await handler(_request("prove it"), None)
+    assert response.headers["X-Router-Layer"] == "heuristics"
+    assert response.headers["X-Router-Model"] == "large"
+    registry.execute_embeddings.assert_not_called()
