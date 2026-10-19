@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: 2026 Simplito sp. z o.o.
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -9,6 +10,7 @@ import pytest
 from server.models.api import AssistantMessage, SystemMessage, TextContentPart, UserMessage
 from server.router.config import RouterOptions, RouterRules
 from server.router.engine import RouterEngine
+from server.router.heuristics import HeuristicScorer
 from server.router.index import KnnIndex
 from server.router.prompt import last_user_text
 
@@ -153,3 +155,90 @@ async def test_rules_without_match_fall_through_to_knn() -> None:
     options = _options(rules=RouterRules(force_large_over_chars=100, force_large_keywords=["prove"]))
     decision = await RouterEngine(options, _index(), embed).decide("hello")
     assert (decision.model, decision.layer) == ("small", "knn")
+
+
+def _scorer(**points: object) -> HeuristicScorer:
+    data: dict[str, object] = {"complex_phrases": ["prove", "step by step"], "simple_phrases": ["what is"]}
+    if points:
+        data["points"] = points
+    return HeuristicScorer.from_dict(data)
+
+
+def test_heuristic_points_for_phrases() -> None:
+    scorer = _scorer()
+    assert scorer.points("Prove it step by step") == 2.0
+    assert scorer.points("What is a cat") == -1.0
+    assert scorer.points("a cat") == 0.0
+    assert scorer.points("provement") == 0.0
+
+
+def test_heuristic_points_for_length_digits_and_url() -> None:
+    scorer = _scorer()
+    assert scorer.points("x" * 401) == 1.0
+    assert scorer.points("x" * 1501) == 2.0
+    assert scorer.points("12345 ab") == -1.0
+    assert scorer.points("see http://a.b") == 1.0
+    assert scorer.points("") == 0.0
+
+
+def test_heuristic_points_are_configurable() -> None:
+    scorer = _scorer(complex_phrase=3.0, simple_phrase=0.0, url=0.0, length=[], digits=None)
+    assert scorer.points("prove 123456 http://a.b " + "x" * 2000) == 3.0
+
+
+def test_heuristics_load_and_validation(tmp_path: Path) -> None:
+    path = tmp_path / "l1.json"
+    path.write_text(json.dumps({"complex_phrases": ["prove"], "simple_phrases": []}), encoding="utf-8")
+    assert HeuristicScorer.load(path).points("prove") == 1.0
+    with pytest.raises(KeyError):
+        HeuristicScorer.from_dict({"simple_phrases": []})
+
+
+@pytest.mark.asyncio
+async def test_heuristics_over_threshold_send_to_large_without_embedding() -> None:
+    async def embed(_: str) -> list[float]:
+        raise AssertionError("embedding must not be computed")
+
+    engine = RouterEngine(_options(heuristic_threshold=2.0), _index(), embed, _scorer())
+    decision = await engine.decide("Prove it step by step")
+    assert decision.layer == "heuristics"
+    assert decision.model == "large"
+    assert decision.heuristic == 2.0
+    assert decision.score is None
+
+
+@pytest.mark.asyncio
+async def test_heuristics_below_threshold_fall_through_to_knn() -> None:
+    async def embed(_: str) -> list[float]:
+        return [1.0, 0.0]
+
+    engine = RouterEngine(_options(heuristic_threshold=2.0), _index(), embed, _scorer())
+    decision = await engine.decide("prove it")
+    assert decision.layer == "knn"
+    assert decision.model == "small"
+    assert decision.heuristic == 1.0
+
+
+@pytest.mark.asyncio
+async def test_engine_without_heuristics_reports_no_points() -> None:
+    async def embed(_: str) -> list[float]:
+        return [1.0, 0.0]
+
+    decision = await RouterEngine(_options(), _index(), embed).decide("hello")
+    assert decision.layer == "knn"
+    assert decision.heuristic is None
+
+
+@pytest.mark.asyncio
+async def test_engine_falls_back_when_heuristics_fail() -> None:
+    class Broken(HeuristicScorer):
+        def points(self, text: str) -> float:
+            raise RuntimeError(text)
+
+    async def embed(_: str) -> list[float]:
+        return [1.0, 0.0]
+
+    broken = Broken.from_dict({"complex_phrases": [], "simple_phrases": []})
+    decision = await RouterEngine(_options(), _index(), embed, broken).decide("hello")
+    assert decision.layer == "fallback"
+    assert decision.model == "large"

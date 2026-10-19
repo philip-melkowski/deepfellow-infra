@@ -29,6 +29,10 @@ class RouterOptions(BaseModel):
     index_path: Annotated[str, Field(min_length=1, description="Path to the .npz index with vectors and labels")]
     k: Annotated[int, Field(ge=1, description="Number of neighbours")] = 20
     threshold: Annotated[float, Field(ge=0.0, le=1.0, description="Score at or above which the large model is used")] = 0.3
+    heuristics_path: Annotated[
+        str | None, Field(description="Path to the JSON parameters of the layer 1 heuristics (None disables them)")
+    ] = None
+    heuristic_threshold: Annotated[float, Field(description="Heuristic points from which the prompt goes to the large model")] = 2.0
     rules: RouterRules = RouterRules()
 
     @classmethod

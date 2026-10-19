@@ -40,6 +40,7 @@ from server.models.services import (
 )
 from server.router.config import RouterOptions
 from server.router.engine import RouterEngine
+from server.router.heuristics import HeuristicScorer
 from server.router.index import KnnIndex
 from server.router.prompt import last_user_text
 from server.services.base2_service import Base2Service, CustomModel, InstanceConfig, ModelConfig
@@ -120,6 +121,19 @@ class RouterService(Base2Service[RouterInstalledInfo, RouterDownloadedInfo]):
                     default="0.3",
                 ),
                 ServiceField(
+                    type="text",
+                    name="heuristics_path",
+                    description="Path to the JSON parameters of the layer 1 heuristics (empty disables them)",
+                    required=False,
+                ),
+                ServiceField(
+                    type="number",
+                    name="heuristic_threshold",
+                    description="Heuristic points from which the large model is used without asking the embeddings",
+                    required=False,
+                    default="2",
+                ),
+                ServiceField(
                     type="number", name="force_large_over_chars", description="Rule: large model above this prompt length", required=False
                 ),
                 ServiceField(
@@ -185,7 +199,14 @@ class RouterService(Base2Service[RouterInstalledInfo, RouterDownloadedInfo]):
         except (OSError, ValueError, KeyError) as e:
             raise HTTPException(400, f"Cannot load the router index {parsed.index_path!r}: {e}") from e
 
-        engine = RouterEngine(parsed, index, lambda text: self._embed(parsed, text))
+        heuristics: HeuristicScorer | None = None
+        if parsed.heuristics_path:
+            try:
+                heuristics = await asyncio.to_thread(HeuristicScorer.load, parsed.heuristics_path)
+            except (OSError, ValueError, KeyError, TypeError) as e:
+                raise HTTPException(400, f"Cannot load the router heuristics {parsed.heuristics_path!r}: {e}") from e
+
+        engine = RouterEngine(parsed, index, lambda text: self._embed(parsed, text), heuristics)
 
         async def func(stream: Stream[StreamChunk]) -> RouterInstalledInfo:  # noqa: ARG001
             self.service_downloaded = True
