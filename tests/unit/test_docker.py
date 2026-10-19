@@ -888,6 +888,39 @@ async def test_generate_docker_compose_content_basic_port(docker_service: Docker
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        pytest.param("pa$word", "pa$$word", id="single-dollar"),
+        pytest.param("pa${word}x", "pa$${word}x", id="braced-reference"),
+        pytest.param("ab$$cd", "ab$$$$cd", id="already-doubled"),
+        pytest.param("end$", "end$$", id="trailing-dollar"),
+        pytest.param("bad${", "bad$${", id="unterminated-brace"),
+        pytest.param("plain", "plain", id="no-dollar"),
+    ],
+)
+async def test_generate_docker_compose_content_escapes_dollar_signs_in_env(
+    docker_service: DockerService, value: str, expected: str
+) -> None:
+    options = _opts(env_vars={"KEY": value})
+
+    result = await docker_service.generate_docker_compose_content(options, 12345)
+
+    written = yaml.safe_load(yaml.dump(result, default_flow_style=False, sort_keys=False))
+    assert written["services"]["mymodel"]["environment"] == {"KEY": expected}
+    assert options.env_vars == {"KEY": value}
+
+
+@pytest.mark.asyncio
+async def test_generate_docker_compose_content_escapes_dollar_signs_in_every_env_key(docker_service: DockerService) -> None:
+    options = _opts(env_vars={"A": "a$a", "B": "b$b", "C": "plain"})
+
+    result = await docker_service.generate_docker_compose_content(options, 12345)
+
+    assert result["services"]["mymodel"]["environment"] == {"A": "a$$a", "B": "b$$b", "C": "plain"}  # pyright: ignore[reportTypedDictNotRequiredAccess]
+
+
+@pytest.mark.asyncio
 async def test_generate_docker_compose_content_subnet_mode(docker_service: DockerService) -> None:
     options = _opts(subnet="my-net")
 

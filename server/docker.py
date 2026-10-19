@@ -1129,10 +1129,14 @@ class DockerService:
         )
 
     async def generate_docker_compose_content(self, options: DockerOptions, port: int | None) -> DockerComposeContent:  # noqa: C901
-        """Generate docker compose content."""
+        """Generate docker compose content.
+
+        Environment values get every "$" doubled, as Compose would otherwise interpolate them (and cut or reject the
+        value). Compose turns "$$" back into "$", so the container sees the configured value unchanged.
+        """
         service: DockerComposeService = {
             "image": options.image,
-            "environment": options.env_vars,
+            "environment": {key: value.replace("$", "$$") for key, value in options.env_vars.items()},
         }
         if options.container_name:
             service["container_name"] = options.container_name
