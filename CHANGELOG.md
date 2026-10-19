@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - `just dev` no longer keeps a CPU core busy watching for file changes: `watchfiles` is now a dev dependency, so uvicorn's auto-reload uses it instead of constantly polling the file system.
+- Container environment values containing a `$` (API keys, tokens, passwords, user-defined values) now reach the container exactly as configured. Infra wrote them unescaped into the compose file, so Docker Compose cut `pa$word` to `pa`, turned `ab$$cd` into `ab$cd` and refused to start a container on a malformed `${`. Every `$` in an environment value is now escaped when the compose file is generated, so a value that deliberately references a variable (`${VAR}`) is no longer filled in from Infra's environment. Compose files already on disk are regenerated and the container recreated on its next start or update.
 
 ### Added
 
