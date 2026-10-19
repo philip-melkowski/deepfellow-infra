@@ -38,6 +38,7 @@ from server.services.ollama_external_service import OllamaExternalService
 from server.services.ollama_service import OllamaService
 from server.services.openai_service import OpenAIService
 from server.services.rerank_service import RerankService
+from server.services.router_service import RouterService
 from server.services.sglang_service import SglangService
 from server.services.speaches_ai_service import SpeachesAIService
 from server.services.stable_diffusion_service import StableDiffusionService
@@ -121,6 +122,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         services_manager.register_service(OllamaService(*model_input))
         services_manager.register_service(OpenAIService(*model_input))
         services_manager.register_service(RerankService(*model_input))
+        services_manager.register_service(RouterService(*model_input))
         services_manager.register_service(SglangService(*model_input))
         services_manager.register_service(SpeachesAIService(*model_input))
         services_manager.register_service(StableDiffusionService(*model_input))
