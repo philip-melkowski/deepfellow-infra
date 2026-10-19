@@ -88,6 +88,11 @@ class TestVllmFilterDockerTags:
         assert "v0.19.0-cu130-ubuntu2404" in result
         assert "v0.19.0-cpu" not in result
 
+    def test_gpu_keeps_plain_release_tags(self, vllm_service: VllmService) -> None:
+        tags = ["v0.31.0", "v0.31.0-ubuntu2404", "v0.31.0-x86_64", "v0.31.0-x86_64-zstd", "v0.31.0-cu129", "v0.31.0-cpu", "latest"]
+        result = vllm_service.filter_docker_tags(tags, "GPU")
+        assert result == ["v0.31.0", "v0.31.0-ubuntu2404", "v0.31.0-x86_64", "v0.31.0-cu129"]
+
     def test_cpu_on_x86_excludes_arm64_tags(self, vllm_service: VllmService) -> None:
         with patch("platform.machine", return_value="x86_64"):
             result = vllm_service.filter_docker_tags(VLLM_CPU_TAGS, "cpu")

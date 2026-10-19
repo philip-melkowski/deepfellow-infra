@@ -222,6 +222,17 @@ class VllmConst(BaseModel):
     models: dict[str, VllmModel]
 
 
+# "v0.31.0", "v0.31.0-ubuntu2404", "v0.31.0-x86_64": the default (CUDA-suffix-less) build of a release
+_PLAIN_RELEASE_TAG = re.compile(r"^v\d+\.\d+\.\d+(-(aarch64|x86_64))?(-ubuntu\d+)?$")
+
+
+def _is_gpu_tag(tag: str) -> bool:
+    """Whether the tag of the GPU vLLM repo is a CUDA build: explicit `-cu*` or the plain release tag."""
+    if "cpu" in tag.lower():
+        return False
+    return bool(re.search(r"cu\d", tag, re.IGNORECASE) or _PLAIN_RELEASE_TAG.match(tag))
+
+
 def _read_models() -> dict[str, VllmModel]:
     vllm_path = get_main_dir() / "./static/vllm-min.json"
     with vllm_path.open(encoding="utf-8") as f:
@@ -1542,11 +1553,11 @@ class VllmService(Base2Service[InstalledInfo, DownloadedInfo]):
         return self.filter_docker_tags(tags, hardware)
 
     def filter_docker_tags(self, tags: list[str], hardware: str | None) -> list[str]:
-        """Filter tags to GPU (-cu*) variants, or for CPU to the tags usable on this host's architecture."""
+        """Filter tags to GPU variants (-cu* and plain release tags), or for CPU to the tags usable on this host's architecture."""
         if hardware is None:
             return tags
         if self._use_gpu_image(hardware):
-            return [t for t in tags if re.search(r"cu\d", t, re.IGNORECASE) and "cpu" not in t.lower()]
+            return [t for t in tags if _is_gpu_tag(t)]
         other_arch_suffix = "-x86_64" if self._is_arm_host() else "-arm64"
         return [t for t in tags if not t.endswith(other_arch_suffix)]
 
