@@ -473,8 +473,15 @@ class VllmService(Base2Service[InstalledInfo, DownloadedInfo]):
         )
         return ServiceSpecification(fields=fields)
 
-    def get_model_spec(self, instance: str, model_type: str) -> ModelSpecification:
-        """Return the model specification."""
+    def _get_model_install_fields(self, instance: str, model_id: str) -> Sequence[ModelField]:
+        """Return the install spec fields of a model, or none if the model or instance is unknown."""
+        model = self.models.get(instance, {}).get(model_id)
+        if model is None or instance not in self.instances_info:
+            return []
+        return self.get_model_type_spec(instance, model.model_type).fields
+
+    def get_model_type_spec(self, instance: str, model_type: str) -> ModelSpecification:
+        """Return the install specification of models of the given type."""
         fields = [
             ModelField(type="text", name="rename", description="Rename the model, hiding its original name", required=False),
             ModelField(
@@ -896,7 +903,7 @@ class VllmService(Base2Service[InstalledInfo, DownloadedInfo]):
                             downloaded=model_id in self.models_downloaded,
                             size=model.size,
                             custom=model.custom,
-                            spec=self.get_model_spec(instance_name, model.model_type),
+                            spec=self.get_model_type_spec(instance_name, model.model_type),
                             has_docker=True,
                             is_loaded=is_loaded,
                             vram_estimate_gb=vram_estimate_gb,
@@ -926,7 +933,7 @@ class VllmService(Base2Service[InstalledInfo, DownloadedInfo]):
             downloaded=model_id in self.models_downloaded,
             size=model.size,
             custom=model.custom,
-            spec=self.get_model_spec(instance, model.model_type),
+            spec=self.get_model_type_spec(instance, model.model_type),
             has_docker=True,
             is_loaded=is_loaded,
             vram_estimate_gb=vram_estimate_gb,

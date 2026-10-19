@@ -160,28 +160,51 @@ def test_const_has_gpu_image_only() -> None:
     assert "sglang" in _const.image.name
 
 
-def test_get_model_spec_baseline_fields(svc: SglangService) -> None:
+def test_get_model_type_spec_baseline_fields(svc: SglangService) -> None:
     installed = _make_installed_info(hardware=True)
     svc.instances_info["default"].installed = installed
 
-    spec = svc.get_model_spec("default", "llm")
+    spec = svc.get_model_type_spec("default", "llm")
 
     field_names = [f.name for f in spec.fields]
     for expected in ("rename", "max_model_length", "quantization", "extra_args", "extra_envs"):
         assert expected in field_names
 
 
-def test_get_model_spec_adds_gpu_priority(svc: SglangService) -> None:
+def test_get_model_install_fields_returns_model_type_spec_fields(svc: SglangService) -> None:
+    svc.instances_info["default"].installed = _make_installed_info(hardware=True)
+    svc.models["default"]["custom-model"] = SglangModel(hf_id="google/gemma-3-270m-it", size="1GB")
+
+    result = svc._get_model_install_fields("default", "custom-model")  # pyright: ignore[reportPrivateUsage]
+
+    assert result == svc.get_model_type_spec("default", "llm").fields
+
+
+def test_get_model_install_fields_returns_empty_list_for_unknown_model(svc: SglangService) -> None:
+    result = svc._get_model_install_fields("default", "ghost-model")  # pyright: ignore[reportPrivateUsage]
+
+    assert result == []
+
+
+def test_get_model_install_fields_returns_empty_list_for_purged_instance(svc: SglangService) -> None:
+    svc.models["gpu2"] = {"m": SglangModel(hf_id="google/gemma-3-270m-it", size="1 GB")}
+
+    result = svc._get_model_install_fields("gpu2", "m")  # pyright: ignore[reportPrivateUsage]
+
+    assert result == []
+
+
+def test_get_model_type_spec_adds_gpu_priority(svc: SglangService) -> None:
     svc.instances_info["default"].config.options = InstallServiceIn(spec={"hardware": True})
 
-    spec = svc.get_model_spec("default", "llm")
+    spec = svc.get_model_type_spec("default", "llm")
 
     field = next(f for f in spec.fields if f.name == "gpu_priority")
     assert field.type == "gpu-priority"
 
 
-def test_get_model_spec_reranker_default_extra_args(svc: SglangService) -> None:
-    spec = svc.get_model_spec("default", "reranker")
+def test_get_model_type_spec_reranker_default_extra_args(svc: SglangService) -> None:
+    spec = svc.get_model_type_spec("default", "reranker")
 
     extra_args_field = next(f for f in spec.fields if f.name == "extra_args")
     assert extra_args_field.default is not None
@@ -2026,19 +2049,19 @@ def test_get_spec_multiple_gpus_offers_all_gpus_option(deps: dict[str, Any]) -> 
     assert hardware_field.default == "GPUs"
 
 
-def test_get_model_spec_adds_hardware_key_when_missing(svc: SglangService, gpu_deps: dict[str, Any]) -> None:
+def test_get_model_type_spec_adds_hardware_key_when_missing(svc: SglangService, gpu_deps: dict[str, Any]) -> None:
     gpu_deps["docker_service"].has_gpu_support = True
     svc.instances_info["default"].config = InstanceConfig(options=InstallServiceIn(spec={}))
 
-    result = svc.get_model_spec("default", "llm")
+    result = svc.get_model_type_spec("default", "llm")
 
     assert result is not None
 
 
-def test_get_model_spec_omits_gpu_priority_for_non_gpu_hardware(svc: SglangService) -> None:
+def test_get_model_type_spec_omits_gpu_priority_for_non_gpu_hardware(svc: SglangService) -> None:
     svc.instances_info["default"].config.options = InstallServiceIn(spec={"hardware": False})
 
-    spec = svc.get_model_spec("default", "llm")
+    spec = svc.get_model_type_spec("default", "llm")
 
     field_names = [f.name for f in spec.fields]
     assert "gpu_priority" not in field_names

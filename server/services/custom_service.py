@@ -661,6 +661,11 @@ class CustomService(Base2Service[InstalledInfo, DownloadedInfo]):
 
         return ListModelsOut(list=out_list)
 
+    def _get_model_install_fields(self, instance: str, model_id: str) -> Sequence[ModelField]:
+        """Return the install spec fields of a model, or none if the model is unknown."""
+        model = self.models.get(instance, {}).get(model_id)
+        return model.model_spec.fields if model else []
+
     async def get_model(self, instance: str, model_id: str) -> RetrieveModelOut:
         """Get the model."""
         info = self.get_instance_installed_info(instance)
@@ -1166,14 +1171,14 @@ def create_doc_chunker_model(custom_service: CustomService, subnet: str | None) 
             ),
             # Empty on purpose: this Infra's key is filled in only in generate_docker_options, never in the spec.
             ModelField(
-                type="text",
+                type="password",
                 name="infra_api_key",
                 description=(
                     "Inference gateway | API key, if the gateway requires one. Empty uses this Infra's key when the URL "
                     "points at this Infra; after rotating it, restart Infra or reinstall doc-chunker."
                 ),
                 required=False,
-                placeholder="",
+                placeholder="Empty: this Infra's API key",
                 default="",
             ),
             ModelField(
@@ -1222,7 +1227,7 @@ def create_doc_chunker_model(custom_service: CustomService, subnet: str | None) 
 
     def generate_docker_options(model_fields: InstallModelOptions) -> DockerOptions:
         hardware_parts = custom_service.get_specified_hardware_parts(model_fields.get("hardware"))
-        # An API install with an empty spec gets no field defaults.
+        # A blank value, or a model installed before install_model filled in field defaults.
         gateway_url = str(model_fields.get("infra_api_url") or "").strip() or DOC_CHUNKER_DEFAULT_GATEWAY_URL
         gateway_api_key = str(model_fields.get("infra_api_key") or "")
         if not gateway_api_key and _is_own_gateway_url(gateway_url, custom_service.config):

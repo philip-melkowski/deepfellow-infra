@@ -10,7 +10,7 @@ import secrets
 import shlex
 import shutil
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -1333,6 +1333,11 @@ class McpService(Base2Service[InstalledInfo, DownloadedInfo]):
                     )
 
         return ListModelsOut(list=out_list)
+
+    def _get_model_install_fields(self, instance: str, model_id: str) -> Sequence[ModelField]:
+        """Return the install spec fields of a model, or none if the model is unknown."""
+        model = self.models.get(instance, {}).get(model_id)
+        return model.model_spec.fields if model else []
 
     async def get_model(self, instance: str, model_id: str) -> RetrieveModelOut:
         """Get the model."""

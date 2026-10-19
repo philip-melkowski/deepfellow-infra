@@ -32,6 +32,7 @@ from server.models.models import (
     InstallModelOut,
     InstallModelProgress,
     ModelField,
+    ModelSpecification,
     UninstallModelIn,
 )
 from server.models.services import (
@@ -57,6 +58,7 @@ from server.utils.exceptions import DockerImageAuthorizationError, DockerImageDo
 from server.utils.hardware import GpuInfo, Hardware, HardwarePartInfo, NvidiaGpuInfo
 from server.utils.logger import logger
 from server.utils.model_downloader import ModelDownloader
+from server.utils.spec_defaults import fill_spec_defaults
 
 if TYPE_CHECKING:
     from server.services_manager import ServicesManager
@@ -1733,10 +1735,25 @@ class Base2Service(Generic[InstalledInfoType, DownloadInfoType], BaseService):  
 
         return reservation.resolve(promise, wrapped_on_success, wrapped_on_error)
 
+    def get_model_spec(self) -> ModelSpecification:
+        """Return the install specification shared by all models of this service; none by default."""
+        return ModelSpecification(fields=[])
+
+    def _get_model_install_fields(self, instance: str, model_id: str) -> Sequence[ModelField]:  # noqa: ARG002
+        """Return the install spec fields of a model; services whose fields depend on the model override this."""
+        return self.get_model_spec().fields
+
     async def install_model(
         self, instance: str, model_id: str, options: InstallModelIn
     ) -> PromiseWithProgress[InstallModelOut, StreamChunk]:
-        """Install the model."""
+        """Install the model.
+
+        Fields the spec leaves out are filled with their defaults first, so a partial spec sent through
+        the API is persisted the same way the WebUI install form would have sent it.
+        """
+        fields = self._get_model_install_fields(instance, model_id)
+        if fields:
+            options = options.model_copy(update={"spec": fill_spec_defaults(fields, options.spec)})
 
         async def on_success(data: InstallModelOut) -> InstallModelOut:
             if instance_failures := self._failed_models.get(instance):

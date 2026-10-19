@@ -19,6 +19,8 @@ from server.models.models import (
     InstallModelOut,
     ListModelsFilters,
     ListModelsOut,
+    ModelField,
+    ModelSpecification,
     RetrieveModelOut,
     UninstallModelIn,
 )
@@ -1743,6 +1745,70 @@ async def test_install_model_does_not_pass_a_container_name_override(base2_svc: 
         await base2_svc.install_model("default", "m1", options)
 
     install_model_mock.assert_awaited_once_with("default", "m1", options, None)
+
+
+@pytest.mark.asyncio
+@patch.object(_Base2Impl, "_install_model", new_callable=AsyncMock)
+@patch.object(_Base2Impl, "_get_model_install_fields")
+async def test_install_model_fills_spec_defaults_from_model_install_fields(
+    mock_get_model_install_fields: MagicMock,
+    mock_install_model: AsyncMock,
+    base2_svc: _Base2Impl,
+    base2_deps: dict[str, Any],
+) -> None:
+    base2_deps["service_provider"].save_service_config = AsyncMock()
+    mock_get_model_install_fields.return_value = [
+        ModelField(type="number", name="max_concurrent", description="workers", default="2", required=False),
+        ModelField(type="text", name="infra_api_url", description="url", default="http://infra:8086"),
+        ModelField(type="text", name="rename", description="rename", required=False),
+    ]
+    mock_install_model.return_value = PromiseWithProgress(value=InstallModelOut(status="OK", details="done"))
+
+    await base2_svc.install_model("default", "m1", InstallModelIn(stream=True, spec={"max_concurrent": 1}))
+
+    assert mock_install_model.call_count == 1
+    assert mock_install_model.call_args == call(
+        "default", "m1", InstallModelIn(stream=True, spec={"max_concurrent": 1, "infra_api_url": "http://infra:8086"}), None
+    )
+
+
+@pytest.mark.asyncio
+@patch.object(_Base2Impl, "_install_model", new_callable=AsyncMock)
+@patch.object(_Base2Impl, "_get_model_install_fields")
+async def test_load_model_keeps_persisted_spec_without_filling_defaults(
+    mock_get_model_install_fields: MagicMock,
+    mock_install_model: AsyncMock,
+    base2_svc: _Base2Impl,
+) -> None:
+    """A model stored before install_model filled in defaults keeps its stored spec on restart."""
+    mock_get_model_install_fields.return_value = [
+        ModelField(type="text", name="infra_api_url", description="url", default="http://infra:8086"),
+    ]
+    mock_install_model.return_value = PromiseWithProgress(value=InstallModelOut(status="OK", details="done"))
+    model = ModelConfig(model_id="m1", options=InstallModelIn(spec={"max_concurrent": 1}))
+
+    await base2_svc.load_model("default", model)
+
+    assert mock_install_model.call_args == call("default", "m1", InstallModelIn(spec={"max_concurrent": 1}), None)
+
+
+def test_get_model_spec_returns_no_fields_by_default(base2_svc: _Base2Impl) -> None:
+    result = base2_svc.get_model_spec()
+
+    assert result == ModelSpecification(fields=[])
+
+
+@patch.object(_Base2Impl, "get_model_spec")
+def test_get_model_install_fields_returns_model_spec_fields_by_default(
+    mock_get_model_spec: MagicMock,
+    base2_svc: _Base2Impl,
+) -> None:
+    fields = [ModelField(type="text", name="rename", description="rename", required=False)]
+    mock_get_model_spec.return_value = ModelSpecification(fields=fields)
+
+    result = base2_svc._get_model_install_fields("default", "m1")  # pyright: ignore[reportPrivateUsage]
+
+    assert result == fields
 
 
 @pytest.mark.asyncio
