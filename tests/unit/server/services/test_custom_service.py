@@ -227,6 +227,18 @@ def test_get_default_model_spec_contains_proxy_timeout_field_exactly_once(svc: C
     assert field_names.count("proxy_timeout_seconds") == 1
 
 
+def test_get_model_install_fields_returns_model_spec_fields(svc: CustomService) -> None:
+    result = svc._get_model_install_fields("default", "doc_chunker")  # pyright: ignore[reportPrivateUsage]
+
+    assert result == svc.models["default"]["doc_chunker"].model_spec.fields
+
+
+def test_get_model_install_fields_returns_empty_list_for_unknown_model(svc: CustomService) -> None:
+    result = svc._get_model_install_fields("default", "ghost-model")  # pyright: ignore[reportPrivateUsage]
+
+    assert result == []
+
+
 @pytest.mark.parametrize(
     "create_model",
     [create_bge_m3_model, create_lemmatizer_model, create_gliner_model, create_doc_chunker_model],
@@ -1607,6 +1619,7 @@ def test_doc_chunker_gateway_fields_default_to_this_infra_without_a_key(svc: Cus
 
     assert url_field.default == DOC_CHUNKER_DEFAULT_GATEWAY_URL
     assert key_field.default == ""
+    assert key_field.type == "password"
     assert "infra-key" not in svc.models["default"]["doc_chunker"].model_spec.model_dump_json()
 
 
@@ -1668,11 +1681,11 @@ async def test_get_duplicate_spec_with_empty_infra_key_keeps_envs_as_is(svc: Cus
 async def test_install_model_doc_chunker_keeps_infra_key_out_of_persisted_config(svc: CustomService, deps: dict[str, Any]):
     svc.instances_info["default"].installed = InstalledInfo(models={}, options=InstallServiceIn(spec={}))
     _mock_successful_install(deps)
+    svc.service_provider.save_service_config = AsyncMock()
+    svc.service_provider.dismiss_warnings_matching = AsyncMock()
 
     with patch.object(svc, "validate_docker_image_version_for_model", new_callable=AsyncMock):
-        promise = await svc._install_model(  # pyright: ignore[reportPrivateUsage]
-            "default", "doc_chunker", InstallModelIn(spec={"hardware": "CPU"})
-        )
+        promise = await svc.install_model("default", "doc_chunker", InstallModelIn(spec={"hardware": "CPU"}))
     await promise.wait()
     instance_config = svc._generate_instance_config(  # pyright: ignore[reportPrivateUsage]
         "default", svc.instances_info["default"].installed, None
@@ -1681,10 +1694,12 @@ async def test_install_model_doc_chunker_keeps_infra_key_out_of_persisted_config
     started_options: DockerOptions = deps["docker_service"].install_and_run_docker.call_args.args[0]
     assert started_options.env_vars is not None
     assert started_options.env_vars["INFRA_API_KEY"] == "infra-key"
-    assert svc.instances_info["default"].installed.models["doc_chunker"].options.spec == {  # pyright: ignore[reportOptionalMemberAccess]
-        "hardware": "CPU",
-        "prefix": "doc_chunker",
-    }
+    persisted_spec = svc.instances_info["default"].installed.models["doc_chunker"].options.spec  # pyright: ignore[reportOptionalMemberAccess]
+    assert persisted_spec is not None
+    assert persisted_spec["hardware"] == "CPU"
+    assert persisted_spec["prefix"] == "doc_chunker"
+    assert persisted_spec["infra_api_url"] == DOC_CHUNKER_DEFAULT_GATEWAY_URL
+    assert persisted_spec["infra_api_key"] == ""
     assert "infra-key" not in instance_config.model_dump_json()
 
 

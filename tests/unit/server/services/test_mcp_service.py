@@ -172,6 +172,18 @@ def test_get_default_model_spec_prefix_default_value(svc: McpService) -> None:
     assert prefix_field.default == "my-prefix"
 
 
+def test_get_model_install_fields_returns_model_spec_fields(svc: McpService) -> None:
+    result = svc._get_model_install_fields("default", "web-search")  # pyright: ignore[reportPrivateUsage]
+
+    assert result == svc.models["default"]["web-search"].model_spec.fields
+
+
+def test_get_model_install_fields_returns_empty_list_for_unknown_model(svc: McpService) -> None:
+    result = svc._get_model_install_fields("default", "ghost-model")  # pyright: ignore[reportPrivateUsage]
+
+    assert result == []
+
+
 def test_get_default_model_spec_has_envs_and_headers(svc: McpService) -> None:
     spec = svc.get_default_model_spec("px")
 
@@ -960,6 +972,18 @@ async def test_install_model_missing_required_env_raises_422(svc: McpService) ->
             InstallModelIn(spec={"prefix": "brave-search", "envs": {"WRONG_KEY": "val"}}),
         )
     assert exc_info.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_install_model_without_required_headers_raises_422(svc: McpService) -> None:
+    """The `Bearer ` template default of a required header must not be filled in as if the client had sent it."""
+    svc.instances_info["default"].installed = InstalledInfo(models={}, options=InstallServiceIn(spec={}))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await svc.install_model("default", "serpapi", InstallModelIn(spec={}))
+
+    assert exc_info.value.status_code == 422
+    assert "required headers are missing: Authorization" in exc_info.value.detail
 
 
 @pytest.mark.asyncio

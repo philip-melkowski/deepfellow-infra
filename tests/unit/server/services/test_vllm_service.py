@@ -185,39 +185,61 @@ def test_const_has_cpu_and_gpu_images() -> None:
     assert _const.images["gpu"].name
 
 
-def test_get_model_spec_baseline_fields(svc: VllmService) -> None:
+def test_get_model_type_spec_baseline_fields(svc: VllmService) -> None:
     installed = _make_installed_info(hardware=False)
     svc.instances_info["default"].installed = installed
 
-    spec = svc.get_model_spec("default", "llm")
+    spec = svc.get_model_type_spec("default", "llm")
 
     field_names = [f.name for f in spec.fields]
     for expected in ("rename", "max_model_length", "quantization", "extra_args", "extra_envs"):
         assert expected in field_names
 
 
-def test_get_model_spec_adds_gpu_priority_for_gpu_hardware(svc: VllmService) -> None:
+def test_get_model_type_spec_adds_gpu_priority_for_gpu_hardware(svc: VllmService) -> None:
     svc.instances_info["default"].config.options = InstallServiceIn(spec={"hardware": True})
 
-    spec = svc.get_model_spec("default", "llm")
+    spec = svc.get_model_type_spec("default", "llm")
 
     field = next(f for f in spec.fields if f.name == "gpu_priority")
     assert field.type == "gpu-priority"
 
 
-def test_get_model_spec_omits_gpu_priority_for_cpu_hardware(svc: VllmService) -> None:
-    spec = svc.get_model_spec("default", "llm")
+def test_get_model_type_spec_omits_gpu_priority_for_cpu_hardware(svc: VllmService) -> None:
+    spec = svc.get_model_type_spec("default", "llm")
 
     field_names = [f.name for f in spec.fields]
     assert "gpu_priority" not in field_names
 
 
-def test_get_model_spec_reranker_default_extra_args(svc: VllmService) -> None:
-    spec = svc.get_model_spec("default", "reranker")
+def test_get_model_type_spec_reranker_default_extra_args(svc: VllmService) -> None:
+    spec = svc.get_model_type_spec("default", "reranker")
 
     extra_args_field = next(f for f in spec.fields if f.name == "extra_args")
     assert extra_args_field.default is not None
     assert "--trust-remote-code" in (extra_args_field.default or "")
+
+
+def test_get_model_install_fields_returns_spec_fields_of_model_type(svc: VllmService) -> None:
+    svc.models["default"]["reranker-model"] = VllmModel(hf_id="BAAI/bge-reranker-v2-m3", size="1 GB", model_type="reranker")
+
+    result = svc._get_model_install_fields("default", "reranker-model")  # pyright: ignore[reportPrivateUsage]
+
+    assert result == svc.get_model_type_spec("default", "reranker").fields
+
+
+def test_get_model_install_fields_returns_empty_list_for_unknown_model(svc: VllmService) -> None:
+    result = svc._get_model_install_fields("default", "ghost-model")  # pyright: ignore[reportPrivateUsage]
+
+    assert result == []
+
+
+def test_get_model_install_fields_returns_empty_list_for_purged_instance(svc: VllmService) -> None:
+    svc.models["gpu2"] = {"m": VllmModel(hf_id="google/gemma-3-270m-it", size="1 GB")}
+
+    result = svc._get_model_install_fields("gpu2", "m")  # pyright: ignore[reportPrivateUsage]
+
+    assert result == []
 
 
 def test_get_custom_model_spec_not_none(svc: VllmService) -> None:
@@ -1695,6 +1717,32 @@ async def test_install_model_registers_reranker_endpoint_for_reranker_model(svc:
 
 
 @pytest.mark.asyncio
+async def test_install_model_with_empty_spec_runs_reranker_with_default_extra_args(
+    svc: VllmService, deps: dict[str, Any], tmp_path: Path
+) -> None:
+    _setup_install_mocks(svc, deps)
+    deps["service_provider"].save_service_config = AsyncMock()
+    deps["service_provider"].dismiss_warnings_matching_any = AsyncMock()
+    reranker_id = "reranker-model"
+    svc.models["default"][reranker_id] = VllmModel(hf_id=reranker_id, size="1GB", model_type="reranker")
+
+    with (
+        patch.object(svc, "_download_model_or_set_progress", new_callable=AsyncMock, return_value=tmp_path / "model"),  # pyright: ignore[reportPrivateUsage]
+        patch("server.services.vllm_service.get_base_url", return_value="http://localhost:8000"),
+        patch.object(svc, "get_specified_hardware_parts", return_value=[]),
+        patch("server.services.vllm_service.validate_model_compatibility", new=AsyncMock(return_value=None)),
+    ):
+        promise = await svc.install_model("default", reranker_id, InstallModelIn(spec={}))
+        await promise.wait()
+
+    installed = svc.get_instance_installed_info("default").models[reranker_id]
+    assert installed.options.spec is not None
+    assert installed.options.spec["extra_args"] == {"--trust-remote-code": ""}
+    docker_options = deps["docker_service"].install_and_run_docker.call_args.args[0]
+    assert "--trust-remote-code" in docker_options.command
+
+
+@pytest.mark.asyncio
 async def test_install_model_docker_failure_decrements_gpu_memory(svc: VllmService, deps: dict[str, Any], tmp_path: Path) -> None:
     nvidia = MagicMock(spec=NvidiaGpuInfo)
     deps["hardware"].gpus = [nvidia]
@@ -2382,11 +2430,11 @@ def test_get_specified_hardware_parts_delegates_to_super_when_hardware_ok(svc: V
     assert result == []
 
 
-def test_get_model_spec_adds_hardware_key_when_missing(svc: VllmService, deps: dict[str, Any]) -> None:
+def test_get_model_type_spec_adds_hardware_key_when_missing(svc: VllmService, deps: dict[str, Any]) -> None:
     deps["docker_service"].has_gpu_support = False
     svc.instances_info["default"].config = InstanceConfig(options=InstallServiceIn(spec={}))
 
-    result = svc.get_model_spec("default", "llm")
+    result = svc.get_model_type_spec("default", "llm")
 
     assert result is not None
 
@@ -4159,7 +4207,13 @@ async def test_edit_model_install_options_keeps_legacy_gpu_utilization(svc: Vllm
     assert was_installed is True
     assert result.status == "OK"
     installed = svc.get_instance_installed_info("default").models[model_id]
-    assert installed.options.spec == {"alias": "renamed", "gpu_memory_utilization": 0.3}
+    assert installed.options.spec == {
+        "alias": "renamed",
+        "gpu_memory_utilization": 0.3,
+        "extra_args": {},
+        "extra_envs": {},
+        "quantization": "",
+    }
 
 
 def _write_cached_adapter(tmp_path: Path, created: str | None = None) -> Path:
