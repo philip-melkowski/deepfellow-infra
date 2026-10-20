@@ -209,3 +209,6 @@ get-sglang-models *FLAGS:
 # Refresh every model list generated from an upstream source, in one go.
 refresh-generated-model-lists: get-ollama-models get-vllm-models get-llamacpp-models get-sglang-models
 
+# Run the changelog-check CI job locally (compares with origin/main)
+changelog-check:
+    sh scripts/changelog_check.sh
