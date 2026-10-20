@@ -1239,6 +1239,20 @@ async def test_resolve_custom_model_size_returns_none_on_exception(svc: RerankSe
 
 
 @pytest.mark.asyncio
+@patch("server.services.rerank_service.fetch_huggingface_model_size", new_callable=AsyncMock)
+async def test_resolve_custom_model_size_passes_hf_token(
+    mock_fetch_huggingface_model_size: AsyncMock, svc: RerankService, deps: dict[str, Any]
+) -> None:
+    deps["config"].hugging_face_token.get_secret_value.return_value = "hf_test_token"
+    mock_fetch_huggingface_model_size.return_value = "2.0 GB"
+
+    await svc._resolve_custom_model_size({"hf_id": "org/private-reranker"})  # pyright: ignore[reportPrivateUsage]
+
+    assert mock_fetch_huggingface_model_size.call_count == 1
+    assert mock_fetch_huggingface_model_size.call_args == call("org/private-reranker", token="hf_test_token")
+
+
+@pytest.mark.asyncio
 async def test_install_model_registration_failure_rolls_back_model_without_unregister(
     svc: RerankService, deps: dict[str, Any], tmp_path: Path
 ) -> None:

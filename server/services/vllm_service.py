@@ -17,7 +17,12 @@ import aiohttp
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
-from scripts.get_huggingface_models import ModelIncompatibleError, fetch_registry_entries, validate_model_compatibility
+from scripts.get_huggingface_models import (
+    ModelIncompatibleError,
+    fetch_model_metadata,
+    fetch_registry_entries,
+    validate_model_compatibility,
+)
 from server.applicationcontext import get_base_url
 from server.config import get_main_dir
 from server.docker import (
@@ -160,6 +165,15 @@ def _is_truthy_flag(value: Any) -> bool:  # noqa: ANN401
     if isinstance(value, str):
         return value.strip().lower() not in ("", "false", "no", "off", "0")
     return bool(value)
+
+
+def _hf_source(spec: dict[str, Any]) -> tuple[Any, Any, Any]:
+    """Return the custom-model spec fields the HuggingFace validation depends on: repo, revision, model type.
+
+    Falsy values are normalized (to `None`, or to `"llm"` for `model_type`, its default) so a field
+    missing from an older stored spec doesn't compare as different from one submitted as `""`.
+    """
+    return (spec.get("hf_id") or None, spec.get("revision") or None, spec.get("model_type") or "llm")
 
 
 class VllmModel(BaseModel):
@@ -591,7 +605,10 @@ class VllmService(Base2Service[InstalledInfo, DownloadedInfo]):
                 CustomModelField(
                     type="bool",
                     name="skip_validation",
-                    description="Skip the HuggingFace compatibility check (use only if it wrongly rejects a repo that does work)",
+                    description=(
+                        "Skip the HuggingFace compatibility heuristics: GGUF, chat template, architecture "
+                        "(use only if they wrongly reject a repo that does work). Repo existence and access are still checked"
+                    ),
                     default="false",
                     required=False,
                 ),
@@ -600,12 +617,18 @@ class VllmService(Base2Service[InstalledInfo, DownloadedInfo]):
 
     async def _resolve_custom_model_size(self, spec: dict[str, Any], instance: str = "") -> str | None:  # noqa: ARG002
         try:
-            return await fetch_huggingface_model_size(spec["hf_id"], spec.get("revision"))
+            return await fetch_huggingface_model_size(spec["hf_id"], spec.get("revision"), token=self.get_hugging_face_token())
         except Exception:
             logger.debug("Couldn't resolve size for a custom model id = %s, revision = %s", spec["hf_id"], spec.get("revision"))
             return None
 
-    async def _validate_custom_model(self, spec: dict[str, Any], instance: str = "") -> None:  # noqa: ARG002
+    async def _validate_custom_model(
+        self,
+        spec: dict[str, Any],
+        instance: str = "",  # noqa: ARG002
+        *,
+        previous: dict[str, Any] | None = None,
+    ) -> None:
         """Validate hf_id compatibility, opportunistically filling in `size` from the same fetch.
 
         `_resolve_custom_model_size` would otherwise issue a second, near-identical HuggingFace
@@ -617,12 +640,19 @@ class VllmService(Base2Service[InstalledInfo, DownloadedInfo]):
         The heuristics `validate_model_compatibility` relies on (GGUF name matching, architecture
         detection) are tuned for filtering a large curated catalog, where an occasional false
         positive silently drops one candidate among hundreds - here they gate a single explicit user
-        action instead, so `spec["skip_validation"]` lets a user bypass the check for a repo they've
-        confirmed works despite being misdetected.
+        action instead, so `spec["skip_validation"]` lets a user bypass those heuristics for a repo
+        they've confirmed works despite being misdetected. It doesn't bypass `fetch_model_metadata`'s
+        check that the repo/revision exists and is accessible: the download uses the same host and
+        token, so a definite "not found"/"no access" there can't be a false positive.
 
-        Sends the configured HuggingFace token, if any, so a gated repo (e.g. Llama, Gemma) that
+        On an edit (`previous` set) that keeps the repo, revision and model type, HuggingFace isn't
+        queried at all: the model already passed this validation when it was added, and its weights
+        may already be downloaded, so an edit of an unrelated field (e.g. `quantization`) mustn't be
+        blocked by a since-revoked or removed token, or a repo that has since become gated.
+
+        Sends the configured HuggingFace token, if any, so a gated or private repo that
         `add_custom_model` can already download validates the same way it downloads, instead of
-        being wrongly rejected as missing/incompatible when accessed anonymously.
+        being wrongly rejected as missing/inaccessible when accessed anonymously.
 
         If `adapter_id` is set, this is a df-finetune LoRA adapter install rather than a plain HF
         model: `hf_id`/`lora_rank` are resolved from the adapter registry (overwriting whatever was
@@ -633,15 +663,21 @@ class VllmService(Base2Service[InstalledInfo, DownloadedInfo]):
             await self._resolve_adapter_metadata(spec, adapter_id)
         elif not spec.get("hf_id"):
             raise HTTPException(400, "Either 'hf_id' or 'adapter_id' must be provided.")
-        if _is_truthy_flag(spec.get("skip_validation")):
-            return
         hf_id = spec.get("hf_id")
         if not hf_id:
             return
-        headers = Utils.create_bearer_header(self.get_hugging_face_token())
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20), headers=headers) as session:
+        if previous is not None and _hf_source(previous) == _hf_source(spec):
+            return
+        token = self.get_hugging_face_token()
+        revision = spec.get("revision")
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20), headers=Utils.create_bearer_header(token)) as session:
             try:
-                data = await validate_model_compatibility(session, hf_id, spec.get("revision"), spec.get("model_type") or "llm")
+                if _is_truthy_flag(spec.get("skip_validation")):
+                    data = await fetch_model_metadata(session, hf_id, revision, authenticated=bool(token))
+                else:
+                    data = await validate_model_compatibility(
+                        session, hf_id, revision, spec.get("model_type") or "llm", authenticated=bool(token)
+                    )
             except ModelIncompatibleError as exc:
                 raise HTTPException(400, str(exc)) from exc
         if data is not None and not spec.get("size"):

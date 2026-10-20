@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: 2026 Simplito sp. z o.o.
 
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
+import aiohttp
 import pytest
+from multidict import CIMultiDict
 
 from server.utils.size_fetcher import (
     HF_API,
@@ -255,6 +257,64 @@ async def test_fetch_hf_size_bytes_url_encodes_revision() -> None:
     requested_url = session_mock.return_value.__aenter__.return_value.get.call_args.args[0]
     assert requested_url == f"{HF_API}/models/google/gemma/revision/refs%2Fpr%2F1%23notes"
     assert result == 1024
+
+
+@pytest.mark.parametrize(
+    ("token", "expected_headers"),
+    [
+        ("hf_test_token", {"User-Agent": "Mozilla/5.0", "Authorization": "Bearer hf_test_token"}),
+        ("", {"User-Agent": "Mozilla/5.0"}),
+    ],
+    ids=("with_token", "without_token"),
+)
+@pytest.mark.asyncio
+@patch("server.utils.size_fetcher.aiohttp.ClientSession")
+async def test_fetch_hf_size_bytes_sends_bearer_header_only_with_token(
+    mock_client_session: MagicMock, token: str, expected_headers: dict[str, str]
+) -> None:
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.json = AsyncMock(return_value={"siblings": [{"size": 1024}]})
+    mock_client_session.return_value = _make_session_mock(resp, "get").return_value
+
+    result = await _fetch_hf_size_bytes("org/private-model", token=token)
+
+    _mock_get = mock_client_session.return_value.__aenter__.return_value.get
+    assert _mock_get.call_count == 1
+    assert _mock_get.call_args.kwargs["headers"] == expected_headers
+    assert result == 1024
+
+
+@pytest.mark.asyncio
+@patch("server.utils.size_fetcher._fetch_hf_size_bytes", new_callable=AsyncMock)
+async def test_fetch_huggingface_model_size_passes_token(mock__fetch_hf_size_bytes: AsyncMock) -> None:
+    mock__fetch_hf_size_bytes.return_value = 1024**3
+
+    result = await fetch_huggingface_model_size("org/private-model", "main", token="hf_test_token")
+
+    assert result == "1.0 GB"
+    assert mock__fetch_hf_size_bytes.call_count == 1
+    assert mock__fetch_hf_size_bytes.call_args == call("org/private-model", "main", "hf_test_token")
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        aiohttp.ClientResponseError(MagicMock(), (), status=404),
+        aiohttp.ClientResponseError(MagicMock(), (), status=401),
+        aiohttp.ClientResponseError(MagicMock(), (), status=403, headers=CIMultiDict({"X-Error-Code": "GatedRepo"})),
+        TimeoutError(),
+    ],
+    ids=("not_found", "no_access", "gated", "timeout"),
+)
+@pytest.mark.asyncio
+@patch("server.utils.size_fetcher._fetch_hf_size_bytes", new_callable=AsyncMock)
+async def test_fetch_huggingface_model_size_returns_none_on_hf_error(mock__fetch_hf_size_bytes: AsyncMock, exc: Exception) -> None:
+    mock__fetch_hf_size_bytes.side_effect = exc
+
+    result = await fetch_huggingface_model_size("org/model", token="hf_test_token")
+
+    assert result is None
 
 
 def _make_ollama_html_with_tag(tag: str, size_str: str) -> str:
