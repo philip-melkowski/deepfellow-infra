@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- `changelog-check` CI job needs an `[Unreleased]` entry (skip: `[skip changelog-check]` in MR title).
 - Security headers (`Content-Security-Policy`, `Strict-Transport-Security`, etc.) on every HTTP response.
 - `Cache-Control: no-store` on API responses and `no-cache` on WebUI files.
 - `props.alias_of` in `GET /v1/models` with `additional_data=true` shows which models an alias points to.
