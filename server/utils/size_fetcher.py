@@ -9,7 +9,8 @@ from urllib.parse import quote
 
 import aiohttp
 
-from server.utils.core import convert_size_to_bytes
+from scripts.utils.hf_common import classify_hf_error
+from server.utils.core import Utils, convert_size_to_bytes
 from server.utils.logger import logger
 
 HF_API = "https://huggingface.co/api"
@@ -42,14 +43,14 @@ def sum_siblings_size_bytes(siblings: list[dict[str, Any]]) -> int | None:
     return total if total else None
 
 
-async def _fetch_hf_size_bytes(hf_id: str, revision: str | None = None) -> int | None:
+async def _fetch_hf_size_bytes(hf_id: str, revision: str | None = None, token: str = "") -> int | None:
     url = f"{HF_API}/models/{hf_id}/revision/{quote(revision, safe='')}" if revision else f"{HF_API}/models/{hf_id}"
     async with (
         aiohttp.ClientSession() as session,
         session.get(
             url,
             params={"blobs": "true"},
-            headers=_HEADERS,
+            headers={**_HEADERS, **Utils.create_bearer_header(token)},
             timeout=aiohttp.ClientTimeout(total=15),
         ) as resp,
     ):
@@ -116,11 +117,14 @@ async def fetch_file_size_from_url(url: str) -> str | None:
         return None
 
 
-async def fetch_huggingface_model_size(hf_id: str, revision: str | None = None) -> str | None:
-    """Return human-readable total size from HuggingFace Hub API, or None on failure."""
+async def fetch_huggingface_model_size(hf_id: str, revision: str | None = None, token: str = "") -> str | None:
+    """Return human-readable total size from HuggingFace Hub API, or None on failure.
+
+    Never raises: size is informational, and blocking an add on a bad repo is `_validate_custom_model`'s job.
+    """
     try:
-        n = await _fetch_hf_size_bytes(hf_id, revision)
+        n = await _fetch_hf_size_bytes(hf_id, revision, token)
         return fmt_size(n) if n is not None else None
-    except Exception:
-        logger.warning("Failed to fetch HuggingFace model size for: %s, revision: %s", hf_id, revision)
+    except Exception as exc:
+        logger.warning("Failed to fetch HuggingFace model size for: %s, revision: %s (%s)", hf_id, revision, classify_hf_error(exc))
         return None

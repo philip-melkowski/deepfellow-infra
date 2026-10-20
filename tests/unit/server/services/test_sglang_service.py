@@ -1861,6 +1861,20 @@ async def test_resolve_custom_model_size_returns_none_on_exception(svc: SglangSe
     assert result is None
 
 
+@pytest.mark.asyncio
+@patch("server.services.sglang_service.fetch_huggingface_model_size", new_callable=AsyncMock)
+async def test_resolve_custom_model_size_passes_hf_token(
+    mock_fetch_huggingface_model_size: AsyncMock, svc: SglangService, gpu_deps: dict[str, Any]
+) -> None:
+    gpu_deps["config"].hugging_face_token.get_secret_value.return_value = "hf_test_token"
+    mock_fetch_huggingface_model_size.return_value = "4.0 GB"
+
+    await svc._resolve_custom_model_size({"hf_id": "org/private-model", "revision": "main"})  # pyright: ignore[reportPrivateUsage]
+
+    assert mock_fetch_huggingface_model_size.call_count == 1
+    assert mock_fetch_huggingface_model_size.call_args == call("org/private-model", "main", token="hf_test_token")
+
+
 def test_get_vram_estimate_returns_value(svc: SglangService) -> None:
     svc.hardware.total_vram_gb = 24.0  # pyright: ignore[reportAttributeAccessIssue]
     model_info = _make_model_installed_info("test-model", gpu_memory_utilization=0.5)

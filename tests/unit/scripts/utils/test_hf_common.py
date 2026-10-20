@@ -8,9 +8,11 @@ import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import pytest
+from multidict import CIMultiDict
 
-from scripts.utils.hf_common import get_model_detail_cached
+from scripts.utils.hf_common import HfErrorKind, classify_hf_error, get_model_detail_cached
 
 
 def _make_mock_session(json_data: object) -> MagicMock:
@@ -141,3 +143,45 @@ async def test_cache_write_failure_still_returns_data(tmp_path: Path) -> None:
     result = await get_model_detail_cached(session, "org/model", cache_dir=blocker / "cache")
 
     assert result == {"siblings": ["a"]}
+
+
+def _response_error(status: int, error_code: str | None = None) -> aiohttp.ClientResponseError:
+    headers = CIMultiDict({"X-Error-Code": error_code}) if error_code else None
+    return aiohttp.ClientResponseError(MagicMock(), (), status=status, headers=headers)
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (_response_error(404), HfErrorKind.NOT_FOUND),
+        (_response_error(404, "RepoNotFound"), HfErrorKind.NOT_FOUND),
+        (_response_error(404, "RevisionNotFound"), HfErrorKind.REVISION_NOT_FOUND),
+        (_response_error(401), HfErrorKind.NO_ACCESS),
+        (_response_error(403), HfErrorKind.NO_ACCESS),
+        (_response_error(401, "GatedRepo"), HfErrorKind.GATED),
+        (_response_error(403, "GatedRepo"), HfErrorKind.GATED),
+        (_response_error(429), HfErrorKind.UNAVAILABLE),
+        (_response_error(503), HfErrorKind.UNAVAILABLE),
+        (aiohttp.ClientConnectionError("boom"), HfErrorKind.UNAVAILABLE),
+        (TimeoutError(), HfErrorKind.UNAVAILABLE),
+        (ValueError("not an HTTP failure"), HfErrorKind.UNAVAILABLE),
+    ],
+    ids=(
+        "404",
+        "404_repo_not_found",
+        "404_revision_not_found",
+        "401_missing_or_private",
+        "403_no_access",
+        "401_gated",
+        "403_gated",
+        "429_rate_limited",
+        "503_outage",
+        "connection_error",
+        "timeout",
+        "non_http_error",
+    ),
+)
+def test_classify_hf_error_maps_status_and_error_code(exc: Exception, expected: HfErrorKind) -> None:
+    result = classify_hf_error(exc)
+
+    assert result is expected

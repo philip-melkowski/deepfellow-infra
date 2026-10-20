@@ -23,6 +23,8 @@ import aiohttp
 from scripts.utils.hf_common import (
     DEFAULT_MODEL_DETAIL_CACHE_DIR,
     HF_API,
+    HfErrorKind,
+    classify_hf_error,
     get_json_with_retry,
     get_model_detail_cached,
     is_embedding,
@@ -239,8 +241,111 @@ class ModelIncompatibleError(Exception):
     """Raised when a HuggingFace repo is structurally incompatible with the engine's serving mode."""
 
 
+class HfRepoAccessError(ModelIncompatibleError):
+    """Raised when the repo/revision doesn't exist on HuggingFace or can't be accessed with the configured token."""
+
+    def __init__(self, hf_id: str, revision: str | None, kind: HfErrorKind, *, authenticated: bool) -> None:
+        self.kind = kind
+        super().__init__(_access_error_message(hf_id, revision, kind, authenticated=authenticated))
+
+
+def _access_error_message(hf_id: str, revision: str | None, kind: HfErrorKind, *, authenticated: bool) -> str:
+    match kind:
+        case HfErrorKind.REVISION_NOT_FOUND:
+            return f"Revision {revision!r} doesn't exist in {hf_id}; check the branch, tag or commit SHA."
+        case HfErrorKind.NOT_FOUND:
+            return f"{hf_id} doesn't exist on HuggingFace; check the repo id."
+        case HfErrorKind.GATED if authenticated:
+            return (
+                f"{hf_id} is gated, and the configured HuggingFace token is invalid or its account has no access to it; "
+                "check DF_HUGGING_FACE_TOKEN in Configuration and request access on its HuggingFace page."
+            )
+        case HfErrorKind.GATED:
+            return f"{hf_id} is gated; request access on its HuggingFace page and set DF_HUGGING_FACE_TOKEN in Configuration."
+        case _ if authenticated:
+            return f"{hf_id} doesn't exist, or the configured HuggingFace token is invalid or has no access to it."
+        case _:
+            return f"{hf_id} doesn't exist or is private; check the repo id, or set DF_HUGGING_FACE_TOKEN in Configuration if it's private."
+
+
+async def fetch_model_metadata(
+    session: aiohttp.ClientSession, hf_id: str, revision: str | None, *, authenticated: bool, max_retries: int = 3
+) -> dict[str, Any] | None:
+    """Fetch `hf_id`'s metadata, raising `HfRepoAccessError` if it can't be downloaded with the session's credentials.
+
+    The model downloader pulls from the same host with the same token, so a definite "not found" /
+    "no access" here would fail the download too - unlike the compatibility heuristics, this check
+    can't misfire and isn't skipped by `skip_validation`. A gated repo's metadata is public, so gating is detected from
+    the `gated` field instead: without a token its files can't be downloaded, and with one a single
+    file request checks that the token's account was granted access. Returns `None` on a
+    transient failure (network issue, HF outage, exhausted rate-limit retries), so a temporary HF
+    hiccup or an offline add with a manual size isn't blocked.
+    """
+    url = f"{HF_API}/models/{hf_id}" + (f"/revision/{quote(revision, safe='')}" if revision else "")
+    try:
+        data = await get_json_with_retry(session, url, {"blobs": "true"}, max_retries=max_retries)
+    except (aiohttp.ClientError, TimeoutError) as exc:
+        kind = classify_hf_error(exc)
+        if kind is HfErrorKind.UNAVAILABLE:
+            logger.warning("Couldn't reach HuggingFace to validate %s: %s", hf_id, exc)
+            return None
+        raise HfRepoAccessError(hf_id, revision, kind, authenticated=authenticated) from exc
+    if data.get("gated"):
+        if not authenticated:
+            raise HfRepoAccessError(hf_id, revision, HfErrorKind.GATED, authenticated=False)
+        await _check_gated_file_access(session, hf_id, revision, data.get("siblings", []))
+    return data
+
+
+def _gated_probe_file(siblings: list[dict[str, Any]]) -> str | None:
+    """Pick a file of a gated repo that's served only to accounts with access.
+
+    Not every file of a gated repo is gated - README and LICENSE files stay public - so the probe
+    sticks to files the download needs anyway: `config.json`, then weights, then any JSON.
+    """
+    filenames = [f.get("rfilename", "") for f in siblings]
+    if "config.json" in filenames:
+        return "config.json"
+    for suffix in (".safetensors", ".json"):
+        found = next((name for name in filenames if name.endswith(suffix)), None)
+        if found:
+            return found
+    return None
+
+
+async def _check_gated_file_access(
+    session: aiohttp.ClientSession, hf_id: str, revision: str | None, siblings: list[dict[str, Any]]
+) -> None:
+    """Raise `HfRepoAccessError` if the session's token can't download files of gated `hf_id`.
+
+    A gated repo's metadata is public, so `fetch_model_metadata` can't tell from it whether the
+    token's account was granted access - only a file request can. A HEAD without following
+    redirects is enough: HF answers 401/403 `GatedRepo` before redirecting a file to its CDN. Any
+    other failure (a missing file, an outage) stays lenient, like the rest of the validation.
+    """
+    probe_file = _gated_probe_file(siblings)
+    if probe_file is None:
+        return
+    ref = quote(revision, safe="") if revision else "main"
+    url = f"https://huggingface.co/{hf_id}/resolve/{ref}/{quote(probe_file)}"
+    try:
+        async with session.head(url, allow_redirects=False) as resp:
+            resp.raise_for_status()
+    except (aiohttp.ClientError, TimeoutError) as exc:
+        kind = classify_hf_error(exc)
+        if kind in (HfErrorKind.GATED, HfErrorKind.NO_ACCESS):
+            raise HfRepoAccessError(hf_id, revision, kind, authenticated=True) from exc
+        logger.warning("Couldn't verify access to gated %s: %s", hf_id, exc)
+
+
 async def validate_model_compatibility(
-    session: aiohttp.ClientSession, hf_id: str, revision: str | None, model_type: str, max_retries: int = 3
+    session: aiohttp.ClientSession,
+    hf_id: str,
+    revision: str | None,
+    model_type: str,
+    max_retries: int = 3,
+    *,
+    authenticated: bool = False,
 ) -> dict[str, Any] | None:
     """Raise `ModelIncompatibleError` with a clear reason if `hf_id` can't be served, given `model_type`.
 
@@ -255,20 +360,13 @@ async def validate_model_compatibility(
     request. Returns `None` when either HTTP fetch failed transiently (network issue, HF outage,
     exhausted rate-limit retries) - that's not treated as incompatibility, so a temporary HF hiccup
     doesn't block a valid add; the chat-template check (`has_chat_template(..., strict=True)`) is
-    included in that leniency for the same reason. A repo that doesn't exist or requires auth
-    (404/401/403) is a permanent, user-fixable problem and raises `ModelIncompatibleError` instead.
+    included in that leniency for the same reason. A repo or revision that doesn't exist or can't be
+    accessed is a permanent, user-fixable problem and raises `HfRepoAccessError` instead - see
+    `fetch_model_metadata`; `authenticated` (whether the session sends a HuggingFace token) only
+    picks the wording of that error and whether a gated repo is reachable at all.
     """
-    url = f"{HF_API}/models/{hf_id}" + (f"/revision/{quote(revision, safe='')}" if revision else "")
-    try:
-        data = await get_json_with_retry(session, url, {"blobs": "true"}, max_retries=max_retries)
-    except aiohttp.ClientResponseError as exc:
-        if exc.status in (401, 403, 404):
-            msg = f"{hf_id} could not be found on HuggingFace (or requires authentication); check the repo id and revision."
-            raise ModelIncompatibleError(msg) from exc
-        logger.warning("Transient HuggingFace error validating %s: %s", hf_id, exc)
-        return None
-    except (aiohttp.ClientError, TimeoutError) as exc:
-        logger.warning("Couldn't reach HuggingFace to validate %s: %s", hf_id, exc)
+    data = await fetch_model_metadata(session, hf_id, revision, authenticated=authenticated, max_retries=max_retries)
+    if data is None:
         return None
 
     if is_gguf(data):
@@ -280,6 +378,11 @@ async def validate_model_compatibility(
         try:
             template_ok = await has_chat_template(session, hf_id, siblings, revision=revision, max_retries=max_retries, strict=True)
         except (aiohttp.ClientError, TimeoutError) as exc:
+            # A gated repo's metadata is public but its files aren't: a 401/403 here means the download
+            # would fail too. A 404 only means this one file is missing, so it stays lenient.
+            kind = classify_hf_error(exc)
+            if kind in (HfErrorKind.GATED, HfErrorKind.NO_ACCESS):
+                raise HfRepoAccessError(hf_id, revision, kind, authenticated=authenticated) from exc
             logger.warning("Couldn't verify chat template for %s: %s", hf_id, exc)
             return None
         if not template_ok:

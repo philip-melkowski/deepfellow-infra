@@ -23,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - MR templates (`feature`, `bug`) follow the team-approved version (DFMAIN-56)
 - A model installed or edited through the API with only some of its settings (e.g. by `df suite install`, which sends just `max_concurrent` for doc-chunker) is now stored with every setting the WebUI install form would have filled in, so the model list and `installed.spec` show its full configuration (for doc-chunker: `hardware`, `infra_api_url`, `infra_api_key`, the timeouts and worker settings) instead of only the keys the client sent. Settings the client sends always win. Headers and environment variables an MCP server requires are not filled in from their templates (e.g. `Authorization: Bearer `), so an install that leaves them out is still rejected. The filled-in defaults also take effect when the model runs: a vLLM or SGLang embedding or reranker model installed through the API without `extra_args` now starts with `--trust-remote-code`, as it already did when installed from the WebUI. Models installed before this change keep their stored settings until they are reinstalled or edited.
 - doc-chunker's `infra_api_key` setting is now a password field: a key set by hand is masked in the WebUI model list and settings form, and an empty field says that this Infra's own key is used.
+- Adding a custom vLLM model now rejects a HuggingFace repo that doesn't exist or can't be accessed, with a clear error message.
 
 ## [0.35.0] - 2026-10-15
 

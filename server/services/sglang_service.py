@@ -511,7 +511,7 @@ class SglangService(Base2Service[InstalledInfo, DownloadedInfo]):
 
     async def _resolve_custom_model_size(self, spec: dict[str, Any], instance: str = "") -> str | None:  # noqa: ARG002
         try:
-            return await fetch_huggingface_model_size(spec["hf_id"], spec.get("revision"))
+            return await fetch_huggingface_model_size(spec["hf_id"], spec.get("revision"), token=self.get_hugging_face_token())
         except Exception:
             logger.debug("Couldn't resolve size for a custom model id = %s, revision = %s", spec["hf_id"], spec.get("revision"))
             return None

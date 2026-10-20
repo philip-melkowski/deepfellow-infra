@@ -1378,12 +1378,15 @@ class Base2Service(Generic[InstalledInfoType, DownloadInfoType], BaseService):  
                     return custom.data
         return None
 
-    async def _validate_custom_model(self, spec: dict[str, Any], instance: str = "") -> None:
+    async def _validate_custom_model(self, spec: dict[str, Any], instance: str = "", *, previous: dict[str, Any] | None = None) -> None:
         """Raise `HTTPException(400, ...)` if the custom model spec can't be served; no-op by default.
 
         Runs before `_resolve_custom_model_size`, so an override may also fill in derived fields
         (e.g. `size`) it already fetched, sparing a redundant lookup - callers must not reorder the
         two.
+
+        `previous` is the stored spec when re-validating an edit of an existing model (`None` when
+        adding one), so an override can skip checks the edit can't have affected.
         """
 
     async def add_custom_model(self, instance: str, options: AddCustomModelIn) -> CustomModelId:
@@ -1430,7 +1433,7 @@ class Base2Service(Generic[InstalledInfoType, DownloadInfoType], BaseService):  
             raise HTTPException(404, f"Custom model {custom_model_id} not found.")
         new_data: dict[str, Any] = dict(options.spec)
         if _custom_model_serving_fields_changed(model.data, new_data):
-            await self._validate_custom_model(new_data, instance)
+            await self._validate_custom_model(new_data, instance, previous=model.data)
         if not new_data.get("size"):
             resolved = await self._resolve_custom_model_size(new_data, instance)
             new_data["size"] = resolved or model.data.get("size") or "unknown"

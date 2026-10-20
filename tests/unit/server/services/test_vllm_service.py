@@ -7,14 +7,15 @@ import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 
 import aiohttp
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from scripts.get_huggingface_models import ModelIncompatibleError
+from scripts.get_huggingface_models import HfRepoAccessError, ModelIncompatibleError
+from scripts.utils.hf_common import HfErrorKind
 from server.docker import ContainerStatus
 from server.models.models import AddCustomModelIn, InstallModelIn, ListModelsFilters, UninstallModelIn
 from server.models.services import GpuStats, InstallServiceIn, UninstallServiceIn
@@ -2924,6 +2925,20 @@ async def test_resolve_custom_model_size_returns_none_on_exception(svc: VllmServ
 
 
 @pytest.mark.asyncio
+@patch("server.services.vllm_service.fetch_huggingface_model_size", new_callable=AsyncMock)
+async def test_resolve_custom_model_size_passes_hf_token(
+    mock_fetch_huggingface_model_size: AsyncMock, svc: VllmService, deps: dict[str, Any]
+) -> None:
+    deps["config"].hugging_face_token.get_secret_value.return_value = "hf_test_token"
+    mock_fetch_huggingface_model_size.return_value = "4.0 GB"
+
+    await svc._resolve_custom_model_size({"hf_id": "org/private-model", "revision": "main"})  # pyright: ignore[reportPrivateUsage]
+
+    assert mock_fetch_huggingface_model_size.call_count == 1
+    assert mock_fetch_huggingface_model_size.call_args == call("org/private-model", "main", token="hf_test_token")
+
+
+@pytest.mark.asyncio
 async def test_validate_custom_model_raises_when_neither_hf_id_nor_adapter_id(svc: VllmService, deps: dict[str, Any]) -> None:
     with (
         patch("server.services.vllm_service.validate_model_compatibility", new=AsyncMock()) as mock_validate,
@@ -2944,7 +2959,10 @@ async def test_validate_custom_model_resolves_hf_id_and_rank_from_adapter_regist
     )
     spec: dict[str, Any] = {"adapter_id": "pirate-llama", "skip_validation": True}
 
-    with patch("server.services.vllm_service.aiohttp.ClientSession", mock_session_cls):
+    with (
+        patch("server.services.vllm_service.aiohttp.ClientSession", mock_session_cls),
+        patch("server.services.vllm_service.fetch_model_metadata", new=AsyncMock(return_value=None)),
+    ):
         await svc._validate_custom_model(spec)  # pyright: ignore[reportPrivateUsage]
 
     assert spec["hf_id"] == "Qwen/Qwen3-8B"
@@ -3060,15 +3078,19 @@ async def test_validate_custom_model_does_not_call_adapter_registry_when_adapter
 
 @pytest.mark.parametrize("skip_validation", [True, "true", "True", "1", "yes"])
 @pytest.mark.asyncio
-async def test_validate_custom_model_skips_when_skip_validation_flag_set(
+async def test_validate_custom_model_skips_heuristics_when_skip_validation_flag_set(
     svc: VllmService, deps: dict[str, Any], skip_validation: object
 ) -> None:
-    with patch("server.services.vllm_service.validate_model_compatibility", new=AsyncMock()) as mock_validate:
+    with (
+        patch("server.services.vllm_service.validate_model_compatibility", new=AsyncMock()) as mock_validate,
+        patch("server.services.vllm_service.fetch_model_metadata", new=AsyncMock(return_value=None)) as mock_fetch_metadata,
+    ):
         await svc._validate_custom_model(  # pyright: ignore[reportPrivateUsage]
             {"hf_id": "org/model", "skip_validation": skip_validation}
         )
 
     mock_validate.assert_not_called()
+    mock_fetch_metadata.assert_called_once()
 
 
 @pytest.mark.parametrize("skip_validation", [False, "false", "False", "0", "no", "No", "off", "Off", "", None])
@@ -3128,6 +3150,181 @@ async def test_validate_custom_model_raises_400_on_incompatible_model(svc: VllmS
 
     assert exc_info.value.status_code == 400
     assert "GGUF" in exc_info.value.detail
+
+
+@pytest.mark.parametrize(
+    ("token", "expected_authenticated"),
+    [
+        ("hf_test_token", True),
+        ("", False),
+    ],
+    ids=("with_token", "without_token"),
+)
+@pytest.mark.asyncio
+@patch("server.services.vllm_service.validate_model_compatibility", new_callable=AsyncMock)
+async def test_validate_custom_model_passes_authenticated_to_compatibility_check(
+    mock_validate_model_compatibility: AsyncMock, svc: VllmService, deps: dict[str, Any], token: str, expected_authenticated: bool
+) -> None:
+    deps["config"].hugging_face_token.get_secret_value.return_value = token
+    mock_validate_model_compatibility.return_value = None
+
+    await svc._validate_custom_model({"hf_id": "org/model", "revision": "v2"})  # pyright: ignore[reportPrivateUsage]
+
+    assert mock_validate_model_compatibility.call_count == 1
+    assert mock_validate_model_compatibility.call_args == call(ANY, "org/model", "v2", "llm", authenticated=expected_authenticated)
+
+
+@pytest.mark.asyncio
+@patch("server.services.vllm_service.validate_model_compatibility", new_callable=AsyncMock)
+async def test_validate_custom_model_raises_400_with_access_error_message(
+    mock_validate_model_compatibility: AsyncMock, svc: VllmService, deps: dict[str, Any]
+) -> None:
+    mock_validate_model_compatibility.side_effect = HfRepoAccessError("org/gated-model", None, HfErrorKind.GATED, authenticated=False)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await svc._validate_custom_model({"hf_id": "org/gated-model"})  # pyright: ignore[reportPrivateUsage]
+
+    assert exc_info.value.status_code == 400
+    assert "org/gated-model is gated" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+@patch("server.services.vllm_service.validate_model_compatibility", new_callable=AsyncMock)
+@patch("server.services.vllm_service.fetch_model_metadata", new_callable=AsyncMock)
+async def test_validate_custom_model_skip_validation_checks_repo_access_with_token(
+    mock_fetch_model_metadata: AsyncMock, mock_validate_model_compatibility: AsyncMock, svc: VllmService, deps: dict[str, Any]
+) -> None:
+    deps["config"].hugging_face_token.get_secret_value.return_value = "hf_test_token"
+    mock_fetch_model_metadata.return_value = None
+
+    await svc._validate_custom_model(  # pyright: ignore[reportPrivateUsage]
+        {"hf_id": "org/model", "revision": "v2", "skip_validation": True}
+    )
+
+    assert mock_validate_model_compatibility.call_count == 0
+    assert mock_fetch_model_metadata.call_count == 1
+    assert mock_fetch_model_metadata.call_args == call(ANY, "org/model", "v2", authenticated=True)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [HfErrorKind.NOT_FOUND, HfErrorKind.REVISION_NOT_FOUND, HfErrorKind.NO_ACCESS, HfErrorKind.GATED],
+)
+@pytest.mark.asyncio
+@patch("server.services.vllm_service.fetch_model_metadata", new_callable=AsyncMock)
+async def test_validate_custom_model_skip_validation_still_raises_400_on_inaccessible_repo(
+    mock_fetch_model_metadata: AsyncMock, svc: VllmService, deps: dict[str, Any], kind: HfErrorKind
+) -> None:
+    error = HfRepoAccessError("org/model", "v2", kind, authenticated=False)
+    mock_fetch_model_metadata.side_effect = error
+
+    with pytest.raises(HTTPException) as exc_info:
+        await svc._validate_custom_model(  # pyright: ignore[reportPrivateUsage]
+            {"hf_id": "org/model", "revision": "v2", "skip_validation": True}
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == str(error)
+
+
+@pytest.mark.asyncio
+@patch("server.services.vllm_service.fetch_model_metadata", new_callable=AsyncMock)
+async def test_validate_custom_model_skip_validation_fills_size_from_metadata(
+    mock_fetch_model_metadata: AsyncMock, svc: VllmService, deps: dict[str, Any]
+) -> None:
+    mock_fetch_model_metadata.return_value = {"siblings": [{"rfilename": "model.safetensors", "size": 4 * 1024**3}]}
+    spec: dict[str, Any] = {"hf_id": "org/model", "skip_validation": True}
+
+    await svc._validate_custom_model(spec)  # pyright: ignore[reportPrivateUsage]
+
+    assert spec["size"] == "4.0 GB"
+
+
+@pytest.mark.parametrize(
+    ("previous", "spec"),
+    [
+        ({"hf_id": "org/model", "quantization": ""}, {"hf_id": "org/model", "quantization": "fp8"}),
+        ({"hf_id": "org/model", "revision": "v2"}, {"hf_id": "org/model", "revision": "v2", "extra_args": {"--dtype": "half"}}),
+        ({"hf_id": "org/model"}, {"hf_id": "org/model", "revision": "", "model_type": "llm", "quantization": "fp8"}),
+        ({"hf_id": "org/model", "skip_validation": True}, {"hf_id": "org/model", "skip_validation": False}),
+    ],
+    ids=("quantization", "extra_args_with_revision", "absent_vs_default_fields", "skip_validation_toggled"),
+)
+@pytest.mark.asyncio
+@patch("server.services.vllm_service.validate_model_compatibility", new_callable=AsyncMock)
+@patch("server.services.vllm_service.fetch_model_metadata", new_callable=AsyncMock)
+async def test_validate_custom_model_skips_huggingface_on_edit_keeping_repo(
+    mock_fetch_model_metadata: AsyncMock,
+    mock_validate_model_compatibility: AsyncMock,
+    svc: VllmService,
+    deps: dict[str, Any],
+    previous: dict[str, Any],
+    spec: dict[str, Any],
+) -> None:
+    await svc._validate_custom_model(spec, previous=previous)  # pyright: ignore[reportPrivateUsage]
+
+    assert mock_fetch_model_metadata.call_count == 0
+    assert mock_validate_model_compatibility.call_count == 0
+
+
+@pytest.mark.parametrize(
+    ("previous", "spec"),
+    [
+        ({"hf_id": "org/model"}, {"hf_id": "org/other-model"}),
+        ({"hf_id": "org/model"}, {"hf_id": "org/model", "revision": "v2"}),
+        ({"hf_id": "org/model", "model_type": "llm"}, {"hf_id": "org/model", "model_type": "embedding"}),
+    ],
+    ids=("hf_id", "revision", "model_type"),
+)
+@pytest.mark.asyncio
+@patch("server.services.vllm_service.validate_model_compatibility", new_callable=AsyncMock)
+async def test_validate_custom_model_validates_on_edit_changing_repo(
+    mock_validate_model_compatibility: AsyncMock,
+    svc: VllmService,
+    deps: dict[str, Any],
+    previous: dict[str, Any],
+    spec: dict[str, Any],
+) -> None:
+    mock_validate_model_compatibility.side_effect = HfRepoAccessError(spec["hf_id"], None, HfErrorKind.GATED, authenticated=False)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await svc._validate_custom_model(spec, previous=previous)  # pyright: ignore[reportPrivateUsage]
+
+    assert exc_info.value.status_code == 400
+    assert mock_validate_model_compatibility.call_count == 1
+
+
+@pytest.mark.asyncio
+@patch("server.services.vllm_service.fetch_model_metadata", new_callable=AsyncMock)
+async def test_validate_custom_model_skip_validation_checks_access_on_edit_changing_repo(
+    mock_fetch_model_metadata: AsyncMock, svc: VllmService, deps: dict[str, Any]
+) -> None:
+    mock_fetch_model_metadata.return_value = None
+
+    await svc._validate_custom_model(  # pyright: ignore[reportPrivateUsage]
+        {"hf_id": "org/other-model", "skip_validation": True}, previous={"hf_id": "org/model", "skip_validation": True}
+    )
+
+    assert mock_fetch_model_metadata.call_count == 1
+
+
+@pytest.mark.asyncio
+@patch("server.services.vllm_service.validate_model_compatibility", new_callable=AsyncMock)
+async def test_validate_custom_model_skips_huggingface_on_edit_keeping_adapter_base_model(
+    mock_validate_model_compatibility: AsyncMock, svc: VllmService, deps: dict[str, Any]
+) -> None:
+    previous = {"adapter_id": "pirate-llama", "hf_id": "org/base-model", "lora_rank": 8}
+    spec: dict[str, Any] = {"adapter_id": "pirate-llama", "quantization": "fp8"}
+
+    async def _resolve(spec: dict[str, Any], adapter_id: str) -> None:
+        spec["hf_id"] = "org/base-model"
+        spec["lora_rank"] = 8
+
+    with patch.object(svc, "_resolve_adapter_metadata", new=AsyncMock(side_effect=_resolve)):
+        await svc._validate_custom_model(spec, previous=previous)  # pyright: ignore[reportPrivateUsage]
+
+    assert mock_validate_model_compatibility.call_count == 0
+    assert spec["hf_id"] == "org/base-model"
 
 
 @pytest.mark.asyncio

@@ -6,20 +6,25 @@
 import asyncio
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
 import aiohttp
 import pytest
+from multidict import CIMultiDict
 
 from scripts.get_huggingface_models import (
     EMBEDDING_TAGS,
     RERANKER_TAGS,
+    HfRepoAccessError,
     ModelIncompatibleError,
+    _gated_probe_file,  # pyright: ignore[reportPrivateUsage]
     classify_modality_support,
     collect_embedding_models,
     collect_llm_models,
     collect_reranker_models,
     fetch_model_details,
+    fetch_model_metadata,
     fetch_popular_embedding_models,
     fetch_popular_models,
     fetch_popular_reranker_models,
@@ -38,7 +43,7 @@ from scripts.get_huggingface_models import (
     main,
     validate_model_compatibility,
 )
-from scripts.utils.hf_common import DEFAULT_MODEL_DETAIL_CACHE_DIR
+from scripts.utils.hf_common import DEFAULT_MODEL_DETAIL_CACHE_DIR, HfErrorKind
 
 
 @pytest.mark.parametrize(
@@ -399,18 +404,257 @@ async def test_validate_model_compatibility_returns_none_on_connection_error() -
     assert result is None
 
 
-@pytest.mark.parametrize("status", [404, 401, 403])
-@pytest.mark.asyncio
-async def test_validate_model_compatibility_raises_for_permanent_fetch_error(status: int) -> None:
+def _make_mock_response(json_data: object = None, status: int | None = None, error_code: str | None = None) -> AsyncMock:
     mock_resp = AsyncMock()
-    mock_resp.raise_for_status = MagicMock(side_effect=aiohttp.ClientResponseError(MagicMock(), (), status=status))
+    if status is None:
+        mock_resp.raise_for_status = MagicMock()
+    else:
+        headers = CIMultiDict({"X-Error-Code": error_code}) if error_code else None
+        mock_resp.raise_for_status = MagicMock(side_effect=aiohttp.ClientResponseError(MagicMock(), (), status=status, headers=headers))
+    mock_resp.json = AsyncMock(return_value=json_data)
     mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
     mock_resp.__aexit__ = AsyncMock(return_value=False)
-    session = MagicMock()
-    session.get = MagicMock(return_value=mock_resp)
+    return mock_resp
 
-    with pytest.raises(ModelIncompatibleError, match="could not be found"):
-        await validate_model_compatibility(session, "org/missing-model", None, "llm", max_retries=1)
+
+@pytest.mark.parametrize(
+    ("status", "error_code", "authenticated", "expected_kind", "expected_message"),
+    [
+        (404, None, False, HfErrorKind.NOT_FOUND, "org/missing-model doesn't exist on HuggingFace; check the repo id."),
+        (404, "RevisionNotFound", False, HfErrorKind.REVISION_NOT_FOUND, "Revision 'v2' doesn't exist in org/missing-model"),
+        (
+            401,
+            None,
+            False,
+            HfErrorKind.NO_ACCESS,
+            "doesn't exist or is private; check the repo id, or set DF_HUGGING_FACE_TOKEN in Configuration",
+        ),
+        (401, None, True, HfErrorKind.NO_ACCESS, "the configured HuggingFace token is invalid or has no access to it"),
+        (403, None, True, HfErrorKind.NO_ACCESS, "the configured HuggingFace token is invalid or has no access to it"),
+        (
+            401,
+            "GatedRepo",
+            False,
+            HfErrorKind.GATED,
+            "is gated; request access on its HuggingFace page and set DF_HUGGING_FACE_TOKEN in Configuration",
+        ),
+        (
+            403,
+            "GatedRepo",
+            True,
+            HfErrorKind.GATED,
+            "is gated, and the configured HuggingFace token is invalid or its account has no access",
+        ),
+    ],
+    ids=(
+        "repo_not_found",
+        "revision_not_found",
+        "missing_or_private_anonymous",
+        "missing_or_no_access_with_token",
+        "forbidden_with_token",
+        "gated_anonymous",
+        "gated_with_token",
+    ),
+)
+@pytest.mark.asyncio
+async def test_validate_model_compatibility_raises_access_error_for_permanent_fetch_error(
+    status: int, error_code: str | None, authenticated: bool, expected_kind: HfErrorKind, expected_message: str
+) -> None:
+    session = MagicMock()
+    session.get = MagicMock(return_value=_make_mock_response(status=status, error_code=error_code))
+
+    with pytest.raises(HfRepoAccessError) as exc_info:
+        await validate_model_compatibility(session, "org/missing-model", "v2", "llm", max_retries=1, authenticated=authenticated)
+
+    assert isinstance(exc_info.value, ModelIncompatibleError)
+    assert exc_info.value.kind is expected_kind
+    assert expected_message in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [aiohttp.ClientConnectionError("boom"), TimeoutError()],
+    ids=("connection_error", "timeout"),
+)
+@pytest.mark.asyncio
+async def test_fetch_model_metadata_returns_none_on_transient_error(exc: Exception) -> None:
+    session = MagicMock()
+    session.get = MagicMock(side_effect=exc)
+
+    result = await fetch_model_metadata(session, "org/model", None, authenticated=False, max_retries=1)
+
+    assert result is None
+
+
+@pytest.mark.parametrize("gated", ["manual", "auto"])
+@pytest.mark.asyncio
+async def test_fetch_model_metadata_raises_gated_error_without_token(gated: str) -> None:
+    session = _make_mock_session({"id": "org/gated-model", "gated": gated, "siblings": []})
+
+    with pytest.raises(HfRepoAccessError) as exc_info:
+        await fetch_model_metadata(session, "org/gated-model", None, authenticated=False)
+
+    assert exc_info.value.kind is HfErrorKind.GATED
+    assert "set DF_HUGGING_FACE_TOKEN in Configuration" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_fetch_model_metadata_returns_gated_metadata_when_token_has_access() -> None:
+    data = {"id": "org/gated-model", "gated": "manual", "siblings": [{"rfilename": "model.safetensors", "size": 1024}]}
+    session = _make_mock_session(data)
+    session.head = MagicMock(return_value=_make_mock_response())
+
+    result = await fetch_model_metadata(session, "org/gated-model", None, authenticated=True)
+
+    assert result == data
+    assert session.head.call_count == 1
+    assert session.head.call_args == call("https://huggingface.co/org/gated-model/resolve/main/model.safetensors", allow_redirects=False)
+
+
+@pytest.mark.parametrize(
+    ("status", "error_code", "expected_kind", "expected_message"),
+    [
+        (401, "GatedRepo", HfErrorKind.GATED, "is gated, and the configured HuggingFace token is invalid or its account has no access"),
+        (403, None, HfErrorKind.NO_ACCESS, "the configured HuggingFace token is invalid or has no access to it"),
+    ],
+    ids=("gated", "no_access"),
+)
+@pytest.mark.asyncio
+async def test_fetch_model_metadata_raises_when_token_has_no_access_to_gated_files(
+    status: int, error_code: str | None, expected_kind: HfErrorKind, expected_message: str
+) -> None:
+    session = _make_mock_session({"id": "org/gated-model", "gated": "manual", "siblings": [{"rfilename": "config.json"}]})
+    session.head = MagicMock(return_value=_make_mock_response(status=status, error_code=error_code))
+
+    with pytest.raises(HfRepoAccessError) as exc_info:
+        await fetch_model_metadata(session, "org/gated-model", None, authenticated=True)
+
+    assert exc_info.value.kind is expected_kind
+    assert expected_message in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "head_kwargs",
+    [
+        {"return_value": _make_mock_response(status=404, error_code="EntryNotFound")},
+        {"return_value": _make_mock_response(status=503)},
+        {"side_effect": TimeoutError()},
+        {"side_effect": aiohttp.ClientConnectionError("boom")},
+    ],
+    ids=("file_missing", "outage", "timeout", "connection_error"),
+)
+@pytest.mark.asyncio
+async def test_fetch_model_metadata_stays_lenient_when_gated_access_check_inconclusive(head_kwargs: dict[str, Any]) -> None:
+    data = {"id": "org/gated-model", "gated": "manual", "siblings": [{"rfilename": "config.json"}]}
+    session = _make_mock_session(data)
+    session.head = MagicMock(**head_kwargs)
+
+    result = await fetch_model_metadata(session, "org/gated-model", None, authenticated=True)
+
+    assert result == data
+
+
+@pytest.mark.asyncio
+async def test_fetch_model_metadata_probes_gated_file_at_encoded_revision() -> None:
+    session = _make_mock_session({"id": "org/gated-model", "gated": "auto", "siblings": [{"rfilename": "config.json"}]})
+    session.head = MagicMock(return_value=_make_mock_response())
+
+    await fetch_model_metadata(session, "org/gated-model", "refs/pr/1", authenticated=True)
+
+    assert session.head.call_args == call("https://huggingface.co/org/gated-model/resolve/refs%2Fpr%2F1/config.json", allow_redirects=False)
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"id": "org/public-model", "gated": False, "siblings": [{"rfilename": "config.json"}]},
+        {"id": "org/gated-model", "gated": "manual", "siblings": [{"rfilename": "README.md"}, {"rfilename": "LICENSE.txt"}]},
+    ],
+    ids=("ungated", "gated_without_probe_file"),
+)
+@pytest.mark.asyncio
+async def test_fetch_model_metadata_skips_gated_access_check(data: dict[str, Any]) -> None:
+    session = _make_mock_session(data)
+    session.head = MagicMock()
+
+    result = await fetch_model_metadata(session, data["id"], None, authenticated=True)
+
+    assert result == data
+    assert session.head.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_fetch_model_metadata_returns_ungated_metadata_without_token() -> None:
+    data = {"id": "org/public-model", "gated": False, "siblings": []}
+    session = _make_mock_session(data)
+
+    result = await fetch_model_metadata(session, "org/public-model", None, authenticated=False)
+
+    assert result == data
+
+
+@pytest.mark.parametrize(
+    ("siblings", "expected"),
+    [
+        ([{"rfilename": "README.md"}, {"rfilename": "model.safetensors"}, {"rfilename": "config.json"}], "config.json"),
+        (
+            [{"rfilename": "LICENSE.txt"}, {"rfilename": "model-00001-of-00002.safetensors"}, {"rfilename": "tokenizer.json"}],
+            "model-00001-of-00002.safetensors",
+        ),
+        ([{"rfilename": "README.md"}, {"rfilename": "tokenizer.json"}], "tokenizer.json"),
+        ([{"rfilename": "README.md"}, {"rfilename": "LICENSE"}, {"rfilename": ".gitattributes"}], None),
+        ([], None),
+    ],
+    ids=("config_json_first", "weights_next", "any_json", "only_public_files", "no_files"),
+)
+def test_gated_probe_file_prefers_files_needed_for_download(siblings: list[dict[str, Any]], expected: str | None) -> None:
+    result = _gated_probe_file(siblings)
+
+    assert result == expected
+
+
+@pytest.mark.asyncio
+async def test_validate_model_compatibility_raises_for_gated_embedding_model_without_access() -> None:
+    session = _make_mock_session({"id": "org/gated-embedder", "gated": "manual", "tags": [], "siblings": [{"rfilename": "config.json"}]})
+    session.head = MagicMock(return_value=_make_mock_response(status=403, error_code="GatedRepo"))
+
+    with pytest.raises(HfRepoAccessError) as exc_info:
+        await validate_model_compatibility(session, "org/gated-embedder", None, "embedding", authenticated=True)
+
+    assert exc_info.value.kind is HfErrorKind.GATED
+
+
+@pytest.mark.parametrize(
+    ("status", "error_code", "expected_kind"),
+    [
+        (403, "GatedRepo", HfErrorKind.GATED),
+        (401, None, HfErrorKind.NO_ACCESS),
+    ],
+    ids=("gated", "no_access"),
+)
+@pytest.mark.asyncio
+async def test_validate_model_compatibility_raises_access_error_when_chat_template_fetch_denied(
+    status: int, error_code: str | None, expected_kind: HfErrorKind
+) -> None:
+    metadata = {"id": "org/model", "tags": [], "siblings": [{"rfilename": "tokenizer_config.json"}]}
+    session = MagicMock()
+    session.get = MagicMock(side_effect=[_make_mock_response(metadata), _make_mock_response(status=status, error_code=error_code)])
+
+    with pytest.raises(HfRepoAccessError) as exc_info:
+        await validate_model_compatibility(session, "org/model", None, "llm", max_retries=1, authenticated=True)
+
+    assert exc_info.value.kind is expected_kind
+
+
+@pytest.mark.asyncio
+async def test_validate_model_compatibility_returns_none_when_tokenizer_config_missing() -> None:
+    metadata = {"id": "org/model", "tags": [], "siblings": [{"rfilename": "tokenizer_config.json"}]}
+    session = MagicMock()
+    session.get = MagicMock(side_effect=[_make_mock_response(metadata), _make_mock_response(status=404, error_code="EntryNotFound")])
+
+    result = await validate_model_compatibility(session, "org/model", None, "llm", max_retries=1)
+
+    assert result is None
 
 
 @pytest.mark.asyncio

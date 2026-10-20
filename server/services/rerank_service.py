@@ -222,7 +222,7 @@ class RerankService(Base2Service[InstalledInfo, DownloadedInfo]):
 
     async def _resolve_custom_model_size(self, spec: dict[str, Any], instance: str = "") -> str | None:  # noqa: ARG002
         try:
-            return await fetch_huggingface_model_size(spec["hf_id"])
+            return await fetch_huggingface_model_size(spec["hf_id"], token=self.get_hugging_face_token())
         except Exception:
             return None
 

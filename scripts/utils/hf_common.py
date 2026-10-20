@@ -9,6 +9,7 @@ import json
 import os
 import re
 import time
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,37 @@ HF_API = "https://huggingface.co/api"
 
 DEFAULT_MODEL_DETAIL_CACHE_DIR = Path(__file__).resolve().parents[2] / ".cache" / "hf_models"
 DEFAULT_MODEL_DETAIL_CACHE_TTL_SECONDS = 1200.0  # 20 min: covers back-to-back get-vllm-models / get-sglang-models runs in one job
+
+
+class HfErrorKind(StrEnum):
+    """Why a HuggingFace Hub request failed, as far as the response lets us tell."""
+
+    NOT_FOUND = "not_found"
+    REVISION_NOT_FOUND = "revision_not_found"
+    GATED = "gated"
+    NO_ACCESS = "no_access"
+    UNAVAILABLE = "unavailable"
+
+
+def classify_hf_error(exc: Exception) -> HfErrorKind:
+    """Classify a failed HuggingFace request by its status and `X-Error-Code` header.
+
+    HF answers an anonymous request for a missing *or* private repo with a bare 401 (no
+    `X-Error-Code`), so as not to leak private repo names - `NO_ACCESS` therefore also covers
+    "doesn't exist" when no token was sent, and callers word their message accordingly.
+    Anything that isn't a definite HTTP answer (429/5xx after retries, connection errors,
+    timeouts) is `UNAVAILABLE`.
+    """
+    if not isinstance(exc, aiohttp.ClientResponseError):
+        return HfErrorKind.UNAVAILABLE
+    error_code = exc.headers.get("X-Error-Code") if exc.headers else None
+    if error_code == "GatedRepo":
+        return HfErrorKind.GATED
+    if exc.status == 404:
+        return HfErrorKind.REVISION_NOT_FOUND if error_code == "RevisionNotFound" else HfErrorKind.NOT_FOUND
+    if exc.status in (401, 403):
+        return HfErrorKind.NO_ACCESS
+    return HfErrorKind.UNAVAILABLE
 
 
 async def get_json_with_retry(session: aiohttp.ClientSession, url: str, params: dict[str, str], max_retries: int = 8) -> Any:  # noqa: ANN401
