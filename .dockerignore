@@ -11,9 +11,6 @@ Apply
 # Include "scripts" directory
 !scripts/
 
-# Include "tests" directory
-!tests/
-
 # Include "static" directory
 !static/
 static/assets

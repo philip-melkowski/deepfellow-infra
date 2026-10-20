@@ -14,14 +14,12 @@ COPY --from=hub.simplito.com/public/uv:0.11.8@sha256:3b7b60a81d3c57ef471703e5c83
 
 WORKDIR /app
 COPY . .
-RUN uv venv .venv
-RUN uv sync --frozen
-RUN uv run pytest --showlocals --tb=auto -ra --cov server --cov-branch --cov-report=term-missing tests/
-RUN rm -rf .venv
+# Tests are not run here. The `pytest` CI job is the only coverage gate, so the result never depends on which
+# Python patch version this image happens to carry.
 RUN uv sync --frozen --no-dev
 RUN rm -rf .venv/lib/python*/site-packages/*/test
 RUN rm -rf .venv/lib/python*/site-packages/*/tests
-RUN rm -rf tests webui2 .ruff_cache .pytest_cache
+RUN rm -rf webui2 .ruff_cache
 
 FROM hub.simplito.com/public/node:22.20.0-bookworm AS ui-legacy
 WORKDIR /app/webui

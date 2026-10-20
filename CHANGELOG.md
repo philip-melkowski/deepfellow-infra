@@ -17,6 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Models installed or edited through the API with partial settings are stored with the WebUI form defaults (e.g. `--trust-remote-code` for embedding/rerank models); existing models are unchanged until edited.
 - doc-chunker's `infra_api_key` is now a password field, masked in the WebUI.
 - Adding a custom vLLM model now rejects a HuggingFace repo that doesn't exist or can't be accessed, with a clear error.
+- `docker build` no longer runs the test suite, and the image no longer contains `tests/`.
 
 ### Fixed
 
