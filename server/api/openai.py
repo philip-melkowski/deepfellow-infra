@@ -41,10 +41,10 @@ async def on_models(
 ) -> ApiModels | ApiModelsCompatible:
     """Process models request.
 
-    Set `additional_data=true` to also get `props` (context window, type, endpoints) plus `usage`
-    (in-flight requests; a snapshot, not refreshed, for models received from a parent node) and
-    `capacity` per model — omitted by default for strict OpenAI-compatibility, so plain OpenAI SDK
-    clients never see it.
+    Set `additional_data=true` to also get `props` (context window, type, endpoints, and in
+    `alias_of` the models an alias points to) plus `usage` (in-flight requests; a snapshot, not
+    refreshed, for models received from a parent node) and `capacity` per model — omitted by
+    default for strict OpenAI-compatibility, so plain OpenAI SDK clients never see it.
     """
     models = endpoint_registry.get_models()
     return models if additional_data else ApiModelsCompatible(**models.model_dump())
@@ -59,10 +59,10 @@ async def on_model(
 ) -> ApiModel | ApiModelCompatible:
     """Process model request.
 
-    Set `additional_data=true` to also get `props` (context window, type, endpoints) plus `usage`
-    (in-flight requests; a snapshot, not refreshed, for models received from a parent node) and
-    `capacity` — omitted by default for strict OpenAI-compatibility, so plain OpenAI SDK clients
-    never see it.
+    Set `additional_data=true` to also get `props` (context window, type, endpoints, and in
+    `alias_of` the models an alias points to) plus `usage` (in-flight requests; a snapshot, not
+    refreshed, for models received from a parent node) and `capacity` — omitted by default for
+    strict OpenAI-compatibility, so plain OpenAI SDK clients never see it.
     """
     model = endpoint_registry.get_model(model_id)
     return model if additional_data else ApiModelCompatible(**model.model_dump())

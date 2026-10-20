@@ -226,6 +226,80 @@ def test_list_models_reports_aliased_registration_once_under_primary_name():
     assert [m.name for m in listed] == ["gpt-4"]
 
 
+def test_get_models_reports_alias_of_only_on_alias_entry():
+    ep = make_endpoint()
+    ep.add_model("gpt-4", make_props(), SimpleEndpoint(on_request=AsyncMock()), "llm", RegistrationOptions(origin="local", alias="smart"))
+    ep.add_model("llama3", make_props(), SimpleEndpoint(on_request=AsyncMock()), "llm", RegistrationOptions(origin="local"))
+
+    alias_of = {m.id: m.props.alias_of for m in ep.get_models()}
+
+    assert alias_of == {"gpt-4": [], "smart": ["gpt-4"], "llama3": []}
+
+
+def test_get_models_alias_of_a_renamed_model_reports_the_registered_name():
+    ep = make_endpoint()
+    ep.add_model(
+        "corp-gpt", make_props(), SimpleEndpoint(on_request=AsyncMock()), "llm", RegistrationOptions(origin="local", alias="smart")
+    )
+
+    alias_of = {m.id: m.props.alias_of for m in ep.get_models()}
+
+    assert alias_of == {"corp-gpt": [], "smart": ["corp-gpt"]}
+
+
+def test_get_models_alias_shared_by_models_of_several_services_lists_each_model_once():
+    ep = make_endpoint()
+    for model_id, owned_by in (("gpt-4", "openai"), ("gpt-4", "openai"), ("llama3", "ollama"), ("gemma", "vllm")):
+        ep.add_model(
+            model_id,
+            make_props(),
+            SimpleEndpoint(on_request=AsyncMock()),
+            "llm",
+            RegistrationOptions(origin="local", alias="smart", owned_by=owned_by),
+        )
+
+    smart = next(m for m in ep.get_models() if m.id == "smart")
+
+    assert smart.props.alias_of == ["gemma", "gpt-4", "llama3"]
+
+
+def test_get_models_alias_taking_name_of_installed_model_lists_only_aliased_models():
+    ep = make_endpoint()
+    ep.add_model("gpt-4", make_props(), SimpleEndpoint(on_request=AsyncMock()), "llm", RegistrationOptions(origin="local"))
+    ep.add_model("llama3", make_props(), SimpleEndpoint(on_request=AsyncMock()), "llm", RegistrationOptions(origin="local", alias="gpt-4"))
+
+    alias_of = {m.id: m.props.alias_of for m in ep.get_models()}
+
+    assert alias_of == {"gpt-4": ["llama3"], "llama3": []}
+
+
+def test_get_models_alias_of_drops_model_once_its_registration_is_removed():
+    ep = make_endpoint()
+    ep.add_model("gpt-4", make_props(), SimpleEndpoint(on_request=AsyncMock()), "llm", RegistrationOptions(origin="local", alias="smart"))
+    llama = ep.add_model(
+        "llama3", make_props(), SimpleEndpoint(on_request=AsyncMock()), "llm", RegistrationOptions(origin="local", alias="smart")
+    )
+
+    ep.remove_model("llama3", llama)
+
+    smart = next(m for m in ep.get_models() if m.id == "smart")
+    assert smart.props.alias_of == ["gpt-4"]
+
+
+def test_registry_get_model_reports_alias_of():
+    registry = make_registry()
+    registry.embeddings_endpoints.add_model(
+        "text-embedding-3-small",
+        make_props(type="embedding"),
+        SimpleEndpoint(on_request=AsyncMock()),
+        "embedding",
+        RegistrationOptions(origin="local", alias="embedder"),
+    )
+
+    assert registry.get_model("embedder").props.alias_of == ["text-embedding-3-small"]
+    assert registry.get_model("text-embedding-3-small").props.alias_of == []
+
+
 def test_add_model_uses_provided_registration_id():
     ep = make_endpoint()
     reg_opts = RegistrationOptions(origin="local", id="my-id-123")
