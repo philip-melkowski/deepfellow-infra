@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
+from server.endpointregistry import EndpointRegistry
 from server.models.models import InstallModelIn, ListModelsFilters, UninstallModelIn
 from server.models.services import InstallServiceIn, UninstallServiceIn
 from server.services.base2_service import CustomModel, Instance, InstanceConfig
@@ -824,6 +825,33 @@ async def test_install_model_with_rename_uses_rename_as_registered_name(
     installed_info = openai_svc.instances_info["default"].installed
     assert installed_info is not None
     assert installed_info.models["gpt-4o"].registered_name == "my-alias"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("spec", "expected_alias_of"),
+    [
+        ({"rename": "corp-gpt"}, {"corp-gpt": []}),
+        ({"rename": "corp-gpt", "alias": "smart"}, {"corp-gpt": [], "smart": ["corp-gpt"]}),
+    ],
+)
+async def test_install_model_with_rename_hides_original_id_from_models_list(
+    deps: dict[str, Any],
+    spec: dict[str, str],
+    expected_alias_of: dict[str, list[str]],
+) -> None:
+    endpoint_registry = EndpointRegistry(
+        config=MagicMock(), parent_infra=MagicMock(), model_tester=MagicMock(), metrics_registry=MagicMock()
+    )
+    svc = OpenAIService(**(deps | {"endpoint_registry": endpoint_registry}))
+    svc.instances_info["default"].installed = _make_installed()
+
+    promise = await svc._install_model("default", "gpt-4o", InstallModelIn(spec=spec))  # pyright: ignore[reportPrivateUsage]
+    await promise.wait()
+
+    models = endpoint_registry.get_models()
+    assert {m.id: m.props.alias_of for m in models.data} == expected_alias_of
+    assert "gpt-4o" not in models.model_dump_json()
 
 
 @pytest.mark.asyncio

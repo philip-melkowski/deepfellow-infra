@@ -15,15 +15,15 @@ from starlette.testclient import TestClient
 from server.api.openai import router
 from server.core.dependencies import auth_server, get_endpoint_registry
 from server.error_handlers import register_exception_handlers
-from server.models.api import ApiModel, ApiModels, ModelProps
+from server.models.api import ApiModel, ApiModelProps, ApiModels
 
 
-def _make_model_props() -> ModelProps:
-    return ModelProps(private=False, type="llm", endpoints=["chat"])
+def _make_model_props(alias_of: list[str] | None = None) -> ApiModelProps:
+    return ApiModelProps(private=False, type="llm", endpoints=["chat"], alias_of=alias_of or [])
 
 
-def _make_api_model(model_id: str = "gpt-4") -> ApiModel:
-    return ApiModel(id=model_id, object="model", created=0, owned_by="local", props=_make_model_props())
+def _make_api_model(model_id: str = "gpt-4", alias_of: list[str] | None = None) -> ApiModel:
+    return ApiModel(id=model_id, object="model", created=0, owned_by="local", props=_make_model_props(alias_of))
 
 
 @pytest.fixture
@@ -124,6 +124,24 @@ def test_get_model_with_additional_data_returns_full_model(registry: MagicMock, 
 
     assert resp.status_code == 200
     assert "props" in resp.json()
+
+
+def test_get_models_with_additional_data_includes_alias_of(registry: MagicMock, client: TestClient, auth_header: dict[str, str]) -> None:
+    registry.get_models = MagicMock(return_value=ApiModels(data=[_make_api_model("gpt-4"), _make_api_model("smart", ["gpt-4"])]))
+
+    resp = client.get("/v1/models?additional_data=true", headers=auth_header)
+
+    assert resp.status_code == 200
+    assert {m["id"]: m["props"]["alias_of"] for m in resp.json()["data"]} == {"gpt-4": [], "smart": ["gpt-4"]}
+
+
+def test_get_model_with_additional_data_includes_alias_of(registry: MagicMock, client: TestClient, auth_header: dict[str, str]) -> None:
+    registry.get_model = MagicMock(return_value=_make_api_model("smart", ["gpt-4"]))
+
+    resp = client.get("/v1/models/smart?additional_data=true", headers=auth_header)
+
+    assert resp.status_code == 200
+    assert resp.json()["props"]["alias_of"] == ["gpt-4"]
 
 
 def test_get_model_passes_model_id_to_registry(registry: MagicMock, client: TestClient, auth_header: dict[str, str]) -> None:

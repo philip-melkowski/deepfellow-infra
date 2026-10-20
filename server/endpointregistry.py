@@ -25,6 +25,7 @@ from server.models.api import (
     ALL_LLM_SUFFIXES,
     LLM_SUFFIX_MAP,
     ApiModel,
+    ApiModelProps,
     ApiModels,
     ChatCompletionRequest,
     CompletionLegacyRequest,
@@ -415,6 +416,10 @@ class Endpoint[T]:
         """Aggregate `supports_audio` across a model's registrations. See `_aggregate_modality_support`."""
         return self._aggregate_modality_support([item.props.supports_audio for item in model.values()])
 
+    def get_model_alias_of(self, model_id: ModelId, model: dict[RegistrationId, RegisteredModel[T]]) -> list[str]:
+        """Names of the models registered under `model_id` as their alias."""
+        return sorted({item.name for item in model.values() if item.alias == model_id})
+
     @staticmethod
     def _aggregate_capacity(model: dict[RegistrationId, RegisteredModel[T]]) -> int | None:
         """Sum finite capacities across registrations; `None` if any registration is unbounded or unknown."""
@@ -432,7 +437,7 @@ class Endpoint[T]:
             object="model",
             created=self.get_model_created(model),
             owned_by=self.get_model_owned_by(model),
-            props=ModelProps(
+            props=ApiModelProps(
                 private=self.is_model_private(model),
                 type=self.get_model_type(model),
                 endpoints=self.get_model_available_endpoints(model),
@@ -443,6 +448,7 @@ class Endpoint[T]:
                 tools=self.get_model_tools(model),
                 supports_vision=self.get_model_supports_vision(model),
                 supports_audio=self.get_model_supports_audio(model),
+                alias_of=self.get_model_alias_of(model_id, model),
             ),
             usage=sum(item.usage for item in model.values()),
             capacity=self._aggregate_capacity(model),

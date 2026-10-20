@@ -489,12 +489,19 @@ class Model(BaseModel):
         return data
 
 
+class ApiModelProps(ModelProps):
+    """`ModelProps` as reported by `/v1/models`, with fields derived from the whole registry entry."""
+
+    alias_of: list[str] = []
+    """Names of the models this entry is an alias of; renames are never reported."""
+
+
 class ApiModel(BaseModel):
     id: str
     object: Literal["model"]
     created: int
     owned_by: str
-    props: ModelProps
+    props: ApiModelProps
     usage: int = 0
     """Requests in flight for this model, summed across its registrations.
 
