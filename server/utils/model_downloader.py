@@ -15,6 +15,8 @@ from uuid import uuid4
 from aiohttp import ClientSession
 from fastapi import HTTPException
 
+from scripts.get_huggingface_models import HfRepoAccessError
+from scripts.utils.hf_common import HfErrorKind
 from server.config import AppSettings
 from server.utils.core import (
     DownloadedPacket,
@@ -254,15 +256,20 @@ class HuggingFaceRepoDownloader(BaseDownloader):
         return not url.startswith("http") or (bool(re.search(self.huggingface_url_pattern, url)))
 
     @staticmethod
-    async def get_filenames(model_id: str, revision: str | None = None) -> tuple[list[str], int]:
-        """Get filenames from repository."""
+    async def get_filenames(model_id: str, revision: str | None = None, headers: dict[str, str] | None = None) -> tuple[list[str], int]:
+        """Get filenames from repository.
+
+        `headers` carries the HuggingFace token: HF answers an anonymous request for a private repo with 401.
+        """
         filenames: list[str] = []
         url = f"https://huggingface.co/api/models/{model_id}/tree/{quote(revision, safe='') if revision else 'main'}"
+        if headers is None:
+            headers = {}
 
         data: list[dict[str, Any]] = []
         size = 0
         filenames = []
-        async with ClientSession() as session, session.get(url) as response:
+        async with ClientSession() as session, session.get(url, headers=headers) as response:
             if response.status != 200:
                 body = await response.text()
                 msg = f"Cannot download file from {url}, get status code {response.status}, {body}"
@@ -288,12 +295,13 @@ class HuggingFaceRepoDownloader(BaseDownloader):
                 model_id = match.group(1)
 
         try:
-            filenames, size = await self.get_filenames(model_id, revision)
+            filenames, size = await self.get_filenames(model_id, revision, headers=self.headers)
         except HttpClientError as e:
-            if e.status_code == 401:
-                # get_filenames never sends an auth header, so a 401 here can only mean HF didn't
-                # recognize the repository — not a credentials problem.
-                raise HTTPException(404, f"Model repository not found on HuggingFace: https://huggingface.co/{model_id}") from e
+            if e.status_code == 401 or (e.status_code == 404 and e.headers.get("X-Error-Code") == "RepoNotFound"):
+                # HF hides whether a repo exists from a caller without access: 401 (no or invalid token) and
+                # 404 RepoNotFound (valid token without access, or no such repo) can't be told apart.
+                error = HfRepoAccessError(model_id, revision, HfErrorKind.NO_ACCESS, authenticated=bool(self.headers))
+                raise HTTPException(404, str(error)) from e
             self._raise_http_error(e, f"https://huggingface.co/{model_id}")
         yield PreDownloadPacket(size)
         for filename in filenames:
