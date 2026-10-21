@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [0.36.0] - 2026-10-21
 
 ### Added
 
@@ -27,9 +27,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `just dev` no longer keeps a CPU core busy watching for file changes.
 - `$` in container environment values is now escaped, so `pa$word` reaches the container intact; `${VAR}` is no longer expanded. Existing containers pick this up on next start; bge-m3, lemmatizer and doc-chunker containers are recreated once.
 - Private HuggingFace repos now install with the configured token instead of failing with "not found".
-
-### Fixed
-
 - `POST /v1/audio/transcriptions` with `response_format=text` now returns plain text (`text/plain`) for every backend, also when the backend answers with JSON (as vLLM does). Backend errors and the other formats (`json`, `verbose_json`, `srt`, `vtt`) are passed through unchanged.
 
 ## [0.35.0] - 2026-10-15
