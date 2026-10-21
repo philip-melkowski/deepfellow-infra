@@ -452,6 +452,11 @@ def _container_volumes_match(mounts: list[dict[str, Any]], expected_volumes: lis
     return True
 
 
+def _escape_compose_dollars(value: str) -> str:
+    """Double every "$" so Compose writes it literally instead of interpolating it."""
+    return value.replace("$", "$$")
+
+
 def _container_command_matches(actual_cmd: list[str] | None, configured_command: str | list[str] | None) -> bool:
     """Return True if *configured_command* matches a container's live Config.Cmd.
 
@@ -1153,12 +1158,13 @@ class DockerService:
     async def generate_docker_compose_content(self, options: DockerOptions, port: int | None) -> DockerComposeContent:  # noqa: C901
         """Generate docker compose content.
 
-        Environment values get every "$" doubled, as Compose would otherwise interpolate them (and cut or reject the
-        value). Compose turns "$$" back into "$", so the container sees the configured value unchanged.
+        Environment values, command, entrypoint and healthcheck get every "$" doubled, as Compose would otherwise
+        interpolate them (and cut or reject the value). Compose turns "$$" back into "$", so the container sees the
+        configured value unchanged.
         """
         service: DockerComposeService = {
             "image": options.image,
-            "environment": {key: value.replace("$", "$$") for key, value in options.env_vars.items()},
+            "environment": {key: _escape_compose_dollars(value) for key, value in options.env_vars.items()},
         }
         if options.container_name:
             service["container_name"] = options.container_name
@@ -1167,9 +1173,13 @@ class DockerService:
                 raise AppError("Port is required when not in subnet mode")
             service["ports"] = [f"127.0.0.1:{port}:{options.image_port}"]
         if options.healthcheck:
-            service["healthcheck"] = options.healthcheck
+            service["healthcheck"] = {key: _escape_compose_dollars(value) for key, value in options.healthcheck.items()}
         if options.command:
-            service["command"] = options.command
+            service["command"] = (
+                _escape_compose_dollars(options.command)
+                if isinstance(options.command, str)
+                else [_escape_compose_dollars(arg) for arg in options.command]
+            )
         if options.volumes:
             service["volumes"] = options.volumes
         if options.restart:
@@ -1177,7 +1187,7 @@ class DockerService:
         if options.shm_size:
             service["shm_size"] = options.shm_size
         if options.entrypoint:
-            service["entrypoint"] = options.entrypoint
+            service["entrypoint"] = _escape_compose_dollars(options.entrypoint)
         if options.user:
             service["user"] = options.user
         if options.hardware:

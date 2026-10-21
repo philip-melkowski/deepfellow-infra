@@ -887,18 +887,18 @@ async def test_generate_docker_compose_content_basic_port(docker_service: Docker
     assert service["ports"] == ["127.0.0.1:12345:8080"]  # pyright: ignore[reportTypedDictNotRequiredAccess]
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        pytest.param("pa$word", "pa$$word", id="single-dollar"),
-        pytest.param("pa${word}x", "pa$${word}x", id="braced-reference"),
-        pytest.param("ab$$cd", "ab$$$$cd", id="already-doubled"),
-        pytest.param("end$", "end$$", id="trailing-dollar"),
-        pytest.param("bad${", "bad$${", id="unterminated-brace"),
-        pytest.param("plain", "plain", id="no-dollar"),
-    ],
+_DOLLAR_ESCAPE_CASES = (
+    pytest.param("pa$word", "pa$$word", id="single-dollar"),
+    pytest.param("pa${word}x", "pa$${word}x", id="braced-reference"),
+    pytest.param("ab$$cd", "ab$$$$cd", id="already-doubled"),
+    pytest.param("end$", "end$$", id="trailing-dollar"),
+    pytest.param("bad${", "bad$${", id="unterminated-brace"),
+    pytest.param("plain", "plain", id="no-dollar"),
 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("value", "expected"), _DOLLAR_ESCAPE_CASES)
 async def test_generate_docker_compose_content_escapes_dollar_signs_in_env(
     docker_service: DockerService, value: str, expected: str
 ) -> None:
@@ -909,6 +909,62 @@ async def test_generate_docker_compose_content_escapes_dollar_signs_in_env(
     written = yaml.safe_load(yaml.dump(result, default_flow_style=False, sort_keys=False))
     assert written["services"]["mymodel"]["environment"] == {"KEY": expected}
     assert options.env_vars == {"KEY": value}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("value", "expected"), _DOLLAR_ESCAPE_CASES)
+async def test_generate_docker_compose_content_escapes_dollar_signs_in_healthcheck(
+    docker_service: DockerService, value: str, expected: str
+) -> None:
+    options = _opts(healthcheck={"test": value, "interval": "30s"})
+
+    result = await docker_service.generate_docker_compose_content(options, 12345)
+
+    written = yaml.safe_load(yaml.dump(result, default_flow_style=False, sort_keys=False))
+    assert written["services"]["mymodel"]["healthcheck"] == {"test": expected, "interval": "30s"}
+    assert options.healthcheck == {"test": value, "interval": "30s"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("value", "expected"), _DOLLAR_ESCAPE_CASES)
+async def test_generate_docker_compose_content_escapes_dollar_signs_in_string_command(
+    docker_service: DockerService, value: str, expected: str
+) -> None:
+    options = _opts(command=f"serve --password {value}")
+
+    result = await docker_service.generate_docker_compose_content(options, 12345)
+
+    written = yaml.safe_load(yaml.dump(result, default_flow_style=False, sort_keys=False))
+    assert written["services"]["mymodel"]["command"] == f"serve --password {expected}"
+    assert options.command == f"serve --password {value}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("value", "expected"), _DOLLAR_ESCAPE_CASES)
+async def test_generate_docker_compose_content_escapes_dollar_signs_in_list_command(
+    docker_service: DockerService, value: str, expected: str
+) -> None:
+    options = _opts(command=["sh", "-c", value])
+
+    result = await docker_service.generate_docker_compose_content(options, 12345)
+
+    written = yaml.safe_load(yaml.dump(result, default_flow_style=False, sort_keys=False))
+    assert written["services"]["mymodel"]["command"] == ["sh", "-c", expected]
+    assert options.command == ["sh", "-c", value]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("value", "expected"), _DOLLAR_ESCAPE_CASES)
+async def test_generate_docker_compose_content_escapes_dollar_signs_in_entrypoint(
+    docker_service: DockerService, value: str, expected: str
+) -> None:
+    options = _opts(entrypoint=value)
+
+    result = await docker_service.generate_docker_compose_content(options, 12345)
+
+    written = yaml.safe_load(yaml.dump(result, default_flow_style=False, sort_keys=False))
+    assert written["services"]["mymodel"]["entrypoint"] == expected
+    assert options.entrypoint == value
 
 
 @pytest.mark.parametrize(
