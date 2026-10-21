@@ -14,6 +14,8 @@ from fastapi import HTTPException
 from multidict import CIMultiDict, CIMultiDictProxy
 from pydantic import SecretStr
 
+from scripts.get_huggingface_models import HfRepoAccessError
+from scripts.utils.hf_common import HfErrorKind
 from server.utils.core import DownloadedPacket, HttpClientError, PreDownloadPacket, SuccessDownloadPacket
 from server.utils.model_downloader import (
     AdapterRegistryDownloader,
@@ -250,6 +252,34 @@ async def test_hf_repo_downloader_get_filenames_uses_revision() -> None:
 
 
 @pytest.mark.asyncio
+async def test_hf_repo_downloader_get_filenames_sends_given_headers() -> None:
+    mock_response = AsyncMock()
+    mock_response.status = 200
+    mock_response.json = AsyncMock(return_value=[{"type": "file", "path": "model.safetensors", "size": 1000}])
+    client_session_mock = make_client_session_mock(mock_response)
+
+    with patch("server.utils.model_downloader.ClientSession", client_session_mock):
+        await HuggingFaceRepoDownloader.get_filenames("user/repo", headers={"Authorization": "Bearer x"})
+
+    session_mock = client_session_mock.return_value.__aenter__.return_value
+    assert session_mock.get.call_args.kwargs["headers"] == {"Authorization": "Bearer x"}
+
+
+@pytest.mark.asyncio
+async def test_hf_repo_downloader_get_filenames_sends_no_headers_by_default() -> None:
+    mock_response = AsyncMock()
+    mock_response.status = 200
+    mock_response.json = AsyncMock(return_value=[{"type": "file", "path": "model.safetensors", "size": 1000}])
+    client_session_mock = make_client_session_mock(mock_response)
+
+    with patch("server.utils.model_downloader.ClientSession", client_session_mock):
+        await HuggingFaceRepoDownloader.get_filenames("user/repo")
+
+    session_mock = client_session_mock.return_value.__aenter__.return_value
+    assert session_mock.get.call_args.kwargs["headers"] == {}
+
+
+@pytest.mark.asyncio
 async def test_hf_repo_downloader_download_uses_revision_in_resolve_url(tmp_path: Path) -> None:
     dl = _make_hf_repo_dl()
     model_dir = tmp_path / "models"
@@ -372,26 +402,86 @@ async def test_hf_repo_downloader_download_raises_http_exception_on_client_error
     assert exc_info.value.status_code == 500
 
 
-@pytest.mark.asyncio
-async def test_hf_repo_downloader_download_maps_401_from_get_filenames_to_404_not_found(tmp_path: Path) -> None:
-    dl = _make_hf_repo_dl()
-    model_dir = tmp_path / "models"
-    temp_dir = tmp_path / "temp"
+def make_listing_error(status_code: int, body: str, error_code: str | None = None) -> HttpClientError:
+    headers = CIMultiDict({"X-Error-Code": error_code}) if error_code else CIMultiDict()
+    return HttpClientError(message="error", status_code=status_code, headers=CIMultiDictProxy(headers), body=body)
 
-    async def failing_get_filenames(model_id: str, revision: str | None = None) -> tuple[list[str], int]:
-        raise HttpClientError(
-            message="error", status_code=401, headers=CIMultiDictProxy(CIMultiDict()), body="Invalid username or password."
-        )
 
+async def _download_with_failing_listing(dl: HuggingFaceRepoDownloader, tmp_path: Path, error: HttpClientError) -> HTTPException:
     with (
-        patch.object(HuggingFaceRepoDownloader, "get_filenames", new=AsyncMock(side_effect=failing_get_filenames)),
+        patch.object(HuggingFaceRepoDownloader, "get_filenames", new=AsyncMock(side_effect=error)),
         pytest.raises(HTTPException) as exc_info,
     ):
-        async for _ in dl.download("user/repo", model_dir, temp_dir):
+        async for _ in dl.download("user/repo", tmp_path / "models", tmp_path / "temp"):
             pass
+    return exc_info.value
 
-    assert exc_info.value.status_code == 404
-    assert "user/repo" in str(exc_info.value.detail)
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("token", "error", "expected_fragment"),
+    [
+        pytest.param(
+            "hf-key", make_listing_error(401, "Invalid username or password."), "token is invalid or has no access", id="401-with-token"
+        ),
+        pytest.param("", make_listing_error(401, "Invalid username or password."), "DF_HUGGING_FACE_TOKEN", id="401-without-token"),
+        pytest.param(
+            "hf-key",
+            make_listing_error(404, '{"error":"Repository not found"}', "RepoNotFound"),
+            "token is invalid or has no access",
+            id="404-repo-not-found-with-token",
+        ),
+    ],
+)
+async def test_hf_repo_downloader_download_reports_rejected_listing_as_access_error(
+    token: str, error: HttpClientError, expected_fragment: str, tmp_path: Path
+) -> None:
+    exc = await _download_with_failing_listing(_make_hf_repo_dl(token), tmp_path, error)
+
+    assert exc.status_code == 404
+    assert exc.detail == str(HfRepoAccessError("user/repo", None, HfErrorKind.NO_ACCESS, authenticated=bool(token)))
+    assert expected_fragment in str(exc.detail)
+    assert '{"error"' not in str(exc.detail)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "error_code", "body", "expected_status"),
+    [
+        pytest.param(404, "RevisionNotFound", "Revision Not Found", 404, id="404-revision-not-found"),
+        pytest.param(404, None, "Not Found", 404, id="404-without-error-code"),
+        pytest.param(403, None, "Forbidden", 500, id="403"),
+        pytest.param(503, None, "Service Unavailable", 500, id="5xx"),
+    ],
+)
+async def test_hf_repo_downloader_download_other_listing_failures_are_not_reported_as_access_errors(
+    status_code: int, error_code: str | None, body: str, expected_status: int, tmp_path: Path
+) -> None:
+    exc = await _download_with_failing_listing(_make_hf_repo_dl(), tmp_path, make_listing_error(status_code, body, error_code))
+
+    assert exc.status_code == expected_status
+    assert exc.detail == body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("token", "expected_headers"),
+    [
+        pytest.param("hf-key", {"Authorization": "Bearer hf-key"}, id="with-token"),
+        pytest.param("", {}, id="without-token"),
+    ],
+)
+async def test_hf_repo_downloader_download_passes_token_headers_to_get_filenames(
+    token: str, expected_headers: dict[str, str], tmp_path: Path
+) -> None:
+    dl = _make_hf_repo_dl(token)
+    get_filenames_mock = AsyncMock(return_value=([], 0))
+
+    with patch.object(HuggingFaceRepoDownloader, "get_filenames", new=get_filenames_mock):
+        packets = [p async for p in dl.download("user/repo", tmp_path / "models", tmp_path / "temp")]
+
+    assert get_filenames_mock.call_args.kwargs["headers"] == expected_headers
+    assert isinstance(packets[-1], SuccessDownloadPacket)
 
 
 @pytest.mark.asyncio
@@ -400,7 +490,9 @@ async def test_hf_repo_downloader_download_other_status_from_get_filenames_goes_
     model_dir = tmp_path / "models"
     temp_dir = tmp_path / "temp"
 
-    async def failing_get_filenames(model_id: str, revision: str | None = None) -> tuple[list[str], int]:
+    async def failing_get_filenames(
+        model_id: str, revision: str | None = None, headers: dict[str, str] | None = None
+    ) -> tuple[list[str], int]:
         raise make_http_error("Invalid credentials in Authorization header")
 
     with (
@@ -421,7 +513,7 @@ async def test_hf_repo_downloader_download_http_url_not_matching_hf_pattern_uses
     model_dir.mkdir()
     captured_model_id: list[str] = []
 
-    async def capture(model_id: str, revision: str | None = None) -> tuple[list[str], int]:
+    async def capture(model_id: str, revision: str | None = None, headers: dict[str, str] | None = None) -> tuple[list[str], int]:
         captured_model_id.append(model_id)
         return ([], 0)
 

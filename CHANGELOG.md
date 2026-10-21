@@ -25,6 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - vLLM GPU image version list now also offers plain release tags such as `v0.31.0`.
 - `just dev` no longer keeps a CPU core busy watching for file changes.
 - `$` in container environment values is now escaped, so `pa$word` reaches the container intact; `${VAR}` is no longer expanded. Existing containers pick this up on next start.
+- Private HuggingFace repos now install with the configured token instead of failing with "not found".
 
 ## [0.35.0] - 2026-10-15
 
