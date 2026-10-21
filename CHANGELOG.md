@@ -19,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - doc-chunker's `infra_api_key` is now a password field, masked in the WebUI.
 - Adding a custom vLLM model now rejects a HuggingFace repo that doesn't exist or can't be accessed, with a clear error.
 - `docker build` no longer runs the test suite, and the image no longer contains `tests/`.
+- New installs default to vLLM `v0.32.0`, SGLang `v0.5.22` and llama.cpp `b11783`; model catalogs refreshed.
 
 ### Fixed
 

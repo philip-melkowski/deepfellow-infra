@@ -133,6 +133,48 @@
             "context": 512
         },
         {
+            "name": "laya",
+            "size": "",
+            "hash": "0175aca9f021",
+            "context": 8192
+        },
+        {
+            "name": "laya:322m-multilingual-bf16",
+            "size": "658MB",
+            "hash": "c1242e4a83f0",
+            "context": 8192
+        },
+        {
+            "name": "laya:322m-multilingual-mlx-fp16",
+            "size": "678MB",
+            "hash": "63b6e37ecedb",
+            "context": 1024
+        },
+        {
+            "name": "laya:421m-english-bf16",
+            "size": "844MB",
+            "hash": "1f196b378202",
+            "context": 8192
+        },
+        {
+            "name": "laya:421m-english-mlx-fp16",
+            "size": "846MB",
+            "hash": "aaba5574a1e1",
+            "context": 512
+        },
+        {
+            "name": "laya:421m-typed-decisions-bf16",
+            "size": "844MB",
+            "hash": "84a7be5dd978",
+            "context": 8192
+        },
+        {
+            "name": "laya:421m-typed-decisions-mlx-fp16",
+            "size": "846MB",
+            "hash": "c62bc110244c",
+            "context": 1024
+        },
+        {
             "name": "mxbai-embed-large",
             "size": "670MB",
             "hash": "468836162de7",
@@ -387,6 +429,36 @@
             "context": 4096
         },
         {
+            "name": "bonsai-2",
+            "size": "3.2GB",
+            "hash": "c8b5462f8688",
+            "context": 262144
+        },
+        {
+            "name": "bonsai-2:27b",
+            "size": "8.3GB",
+            "hash": "f3c4f4208659",
+            "context": 262144
+        },
+        {
+            "name": "bonsai-2:2b",
+            "size": "911MB",
+            "hash": "de2ccb4e7328",
+            "context": 262144
+        },
+        {
+            "name": "bonsai-2:4b",
+            "size": "1.6GB",
+            "hash": "93edd652c932",
+            "context": 262144
+        },
+        {
+            "name": "bonsai-2:9b",
+            "size": "3.2GB",
+            "hash": "c8b5462f8688",
+            "context": 262144
+        },
+        {
             "name": "clef",
             "size": "",
             "hash": "fdd5939e1bd9",
@@ -631,6 +703,18 @@
             "size": "3.7GB",
             "hash": "8c2d9ddae441",
             "context": 32768
+        },
+        {
+            "name": "d1-omni",
+            "size": "850MB",
+            "hash": "1ba59f63e836",
+            "context": 128000
+        },
+        {
+            "name": "d1-omni:600m",
+            "size": "850MB",
+            "hash": "1ba59f63e836",
+            "context": 128000
         },
         {
             "name": "d1:3b",
@@ -1702,8 +1786,14 @@
         },
         {
             "name": "kev",
-            "size": "6.7GB",
-            "hash": "d31165461ae8",
+            "size": "",
+            "hash": "079f29347a00",
+            "context": 262144
+        },
+        {
+            "name": "kev:0.8b-bf16",
+            "size": "1.5GB",
+            "hash": "5ee097410a63",
             "context": 262144
         },
         {
@@ -1719,6 +1809,12 @@
             "context": 262144
         },
         {
+            "name": "kev:0.8b-q8_0",
+            "size": "812MB",
+            "hash": "a2f47e09befb",
+            "context": 262144
+        },
+        {
             "name": "kev:27b-mlx-bf16",
             "size": "51GB",
             "hash": "b397feb9fd33",
@@ -1731,9 +1827,33 @@
             "context": 262144
         },
         {
+            "name": "kev:4b-bf16",
+            "size": "8.4GB",
+            "hash": "8406d8a74261",
+            "context": 262144
+        },
+        {
             "name": "kev:4b-mlx-bf16",
             "size": "8.4GB",
             "hash": "458360f7747d",
+            "context": 262144
+        },
+        {
+            "name": "kev:4b-q4_K_M",
+            "size": "2.7GB",
+            "hash": "818b6cdb957c",
+            "context": 262144
+        },
+        {
+            "name": "kev:4b-q8_0",
+            "size": "4.5GB",
+            "hash": "46203beabf65",
+            "context": 262144
+        },
+        {
+            "name": "kev:9b-bf16",
+            "size": "18GB",
+            "hash": "925e229ef61d",
             "context": 262144
         },
         {
@@ -1746,6 +1866,18 @@
             "name": "kev:9b-nvfp4",
             "size": "6.7GB",
             "hash": "d31165461ae8",
+            "context": 262144
+        },
+        {
+            "name": "kev:9b-q4_K_M",
+            "size": "5.6GB",
+            "hash": "96375189a97f",
+            "context": 262144
+        },
+        {
+            "name": "kev:9b-q8_0",
+            "size": "9.5GB",
+            "hash": "446718ead956",
             "context": 262144
         },
         {
@@ -1879,30 +2011,6 @@
             "size": "37GB",
             "hash": "de0c566abd07",
             "context": 131072
-        },
-        {
-            "name": "laya",
-            "size": "846MB",
-            "hash": "aaba5574a1e1",
-            "context": 512
-        },
-        {
-            "name": "laya:322m-multilingual-mlx-fp16",
-            "size": "678MB",
-            "hash": "63b6e37ecedb",
-            "context": 1024
-        },
-        {
-            "name": "laya:421m-english-mlx-fp16",
-            "size": "846MB",
-            "hash": "aaba5574a1e1",
-            "context": 512
-        },
-        {
-            "name": "laya:421m-typed-decisions-mlx-fp16",
-            "size": "846MB",
-            "hash": "c62bc110244c",
-            "context": 1024
         },
         {
             "name": "lfm2",
@@ -2640,20 +2748,32 @@
         },
         {
             "name": "nemotron-3-nano",
-            "size": "24GB",
-            "hash": "b725f1117407",
+            "size": "",
+            "hash": "373f79c3ce94",
             "context": 1048576
         },
         {
             "name": "nemotron-3-nano:30b",
-            "size": "24GB",
-            "hash": "b725f1117407",
+            "size": "",
+            "hash": "373f79c3ce94",
             "context": 1048576
         },
         {
+            "name": "nemotron-3-nano:30b-mlx",
+            "size": "18GB",
+            "hash": "c436912ee99d",
+            "context": 262144
+        },
+        {
             "name": "nemotron-3-nano:4b",
-            "size": "2.8GB",
-            "hash": "6cc467f05439",
+            "size": "",
+            "hash": "28e2e9e36b77",
+            "context": 262144
+        },
+        {
+            "name": "nemotron-3-nano:4b-mlx",
+            "size": "2.9GB",
+            "hash": "87e6cab38edd",
             "context": 262144
         },
         {
@@ -2669,33 +2789,63 @@
             "context": 262144
         },
         {
-            "name": "nemotron-3.5-lightning",
+            "name": "nemotron-3.5-bolt",
             "size": "25GB",
-            "hash": "e7a64ff15fb1",
+            "hash": "d6d3deeca271",
+            "context": 262144
+        },
+        {
+            "name": "nemotron-3.5-bolt:74b-a9b",
+            "size": "25GB",
+            "hash": "d6d3deeca271",
+            "context": 262144
+        },
+        {
+            "name": "nemotron-3.5-lightning",
+            "size": "",
+            "hash": "14b60fc91804",
             "context": 1048576
         },
         {
             "name": "nemotron-3.5-lightning:30b",
-            "size": "25GB",
-            "hash": "e7a64ff15fb1",
+            "size": "",
+            "hash": "14b60fc91804",
             "context": 1048576
         },
         {
             "name": "nemotron-3.5-lightning:30b-mlx",
-            "size": "23GB",
-            "hash": "8b1474be6e54",
+            "size": "19GB",
+            "hash": "d1e17d7dabac",
             "context": 262144
         },
         {
+            "name": "nemotron-3.5-super",
+            "size": "",
+            "hash": "d84f81c512c4",
+            "context": 1048576
+        },
+        {
+            "name": "nemotron-3.5-super:120b",
+            "size": "",
+            "hash": "d84f81c512c4",
+            "context": 1048576
+        },
+        {
             "name": "nemotron-cascade-2",
-            "size": "24GB",
-            "hash": "e0705e3fe8f7",
+            "size": "",
+            "hash": "54e93b9643c7",
             "context": 262144
         },
         {
             "name": "nemotron-cascade-2:30b",
-            "size": "24GB",
-            "hash": "e0705e3fe8f7",
+            "size": "",
+            "hash": "54e93b9643c7",
+            "context": 262144
+        },
+        {
+            "name": "nemotron-cascade-2:30b-mlx",
+            "size": "18GB",
+            "hash": "2bdd5dcdbf50",
             "context": 262144
         },
         {
@@ -2711,10 +2861,22 @@
             "context": 4096
         },
         {
-            "name": "nemotron3:33b",
-            "size": "28GB",
-            "hash": "f6d8b7ff496c",
+            "name": "nemotron3",
+            "size": "",
+            "hash": "24f5f4a5b3ea",
             "context": 131072
+        },
+        {
+            "name": "nemotron3:33b",
+            "size": "",
+            "hash": "24f5f4a5b3ea",
+            "context": 131072
+        },
+        {
+            "name": "nemotron3:33b-mlx",
+            "size": "21GB",
+            "hash": "f263b909bfad",
+            "context": null
         },
         {
             "name": "nemotron:70b",
@@ -3095,6 +3257,12 @@
             "context": 262144
         },
         {
+            "name": "ornith-1.5:122b",
+            "size": "",
+            "hash": "ea3e29aebeb8",
+            "context": 262144
+        },
+        {
             "name": "ornith-1.5:35b",
             "size": "23GB",
             "hash": "9f3b89b25219",
@@ -3255,13 +3423,13 @@
         {
             "name": "pplx-decider",
             "size": "17GB",
-            "hash": "f3950da72565",
+            "hash": "733585a9ebb6",
             "context": 262144
         },
         {
             "name": "pplx-decider:27b",
             "size": "17GB",
-            "hash": "f3950da72565",
+            "hash": "733585a9ebb6",
             "context": 262144
         },
         {
@@ -3506,8 +3674,8 @@
         },
         {
             "name": "qwen3-vl",
-            "size": "6.1GB",
-            "hash": "901cae732162",
+            "size": "6.2GB",
+            "hash": "9cf69da2b16d",
             "context": 262144
         },
         {
@@ -3537,13 +3705,13 @@
         {
             "name": "qwen3-vl:4b",
             "size": "3.3GB",
-            "hash": "1343d82ebee3",
+            "hash": "a1b29c246319",
             "context": 262144
         },
         {
             "name": "qwen3-vl:8b",
-            "size": "6.1GB",
-            "hash": "901cae732162",
+            "size": "6.2GB",
+            "hash": "9cf69da2b16d",
             "context": 262144
         },
         {
