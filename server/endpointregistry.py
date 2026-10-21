@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, urljoin, urlparse
 import aiohttp
 from aiohttp import ClientTimeout, JsonPayload
 from fastapi import HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, TypeAdapter, ValidationError, field_validator
 
 from server.config import AppSettings
@@ -1706,7 +1706,10 @@ class EndpointRegistry:
         async def func() -> StarletteResponse:
             return await endpoint.endpoint.on_request(body, request)
 
-        return await self.with_usage(endpoint, func)
+        response = await self.with_usage(endpoint, func)
+        if body.response_format == "text" and not body.stream:
+            return await _unwrap_json_text(response)
+        return response
 
     async def execute_rerank(
         self,
@@ -1944,6 +1947,30 @@ async def post_json_rerank_sglang(
         status_code=http_response.response.status,
         headers=response_headers,
     )
+
+
+async def _unwrap_json_text(response: StarletteResponse) -> StarletteResponse:
+    """Turn a JSON `{"text": ...}` transcription reply into plain text.
+
+    Some backends (e.g. vLLM) answer `response_format=text` with JSON. Errors and replies that are
+    not such JSON are returned unchanged.
+    """
+    if not isinstance(response, StreamingResponse) or not 200 <= response.status_code < 300 or response.media_type != "application/json":
+        return response
+    raw = b"".join([chunk if isinstance(chunk, bytes) else str(chunk).encode() async for chunk in response.body_iterator])
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        data = None
+    if isinstance(data, dict) and isinstance(data.get("text"), str):
+        headers = {k: v for k, v in response.headers.items() if k.lower() not in ("content-length", "content-type")}
+        return PlainTextResponse(data["text"], status_code=response.status_code, headers=headers)
+
+    async def replay() -> AsyncGenerator[bytes]:
+        yield raw
+
+    headers = {k: v for k, v in response.headers.items() if k.lower() != "content-length"}
+    return StreamingResponse(replay(), media_type=response.media_type, status_code=response.status_code, headers=headers)
 
 
 async def post_form(
