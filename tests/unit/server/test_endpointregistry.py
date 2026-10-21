@@ -5,7 +5,7 @@ import json
 import logging
 import time
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import aiohttp
@@ -31,6 +31,7 @@ from server.endpointregistry import (
     _make_request_with_reauth,  # pyright: ignore[reportPrivateUsage]
     _read_body_with_limit,  # pyright: ignore[reportPrivateUsage]
     _rewrite_sse_endpoint_events,  # pyright: ignore[reportPrivateUsage]
+    _unwrap_json_text,  # pyright: ignore[reportPrivateUsage]
     post_form,
     post_json,
     post_json_rerank_sglang,
@@ -2779,6 +2780,7 @@ async def test_execute_audio_transcriptions_success():
 
     body = MagicMock(spec=CreateTranscriptionRequest)
     body.model = "stt"
+    body.response_format = "json"
 
     with patch.object(reg, "with_usage", new_callable=AsyncMock, return_value=response):
         result = await reg.execute_audio_transcriptions(body)
@@ -3918,6 +3920,7 @@ async def test_execute_audio_transcriptions_calls_on_request_directly():
     )
     body = MagicMock(spec=CreateTranscriptionRequest)
     body.model = "stt"
+    body.response_format = "json"
 
     result = await reg.execute_audio_transcriptions(body)
 
@@ -5140,3 +5143,104 @@ def test_register_proxy_mcp_sse_url_uses_model_name_prefix():
 
     assert mock_sse.call_args.kwargs["options"].url == "http://child.example.com/mcp/my-prefix/sse"
     assert mock_sse.call_args.kwargs["url"] == "my-prefix"
+
+
+async def _transcribe(
+    response_format: str | None, response: StreamingResponse, origin: str = "remote", stream: bool = False
+) -> tuple[EndpointRegistry, Any]:
+    reg = make_registry()
+    reg.register_audio_transcriptions(
+        "stt",
+        make_props(),
+        SimpleEndpoint(on_request=AsyncMock(return_value=response)),
+        RegistrationOptions(origin=origin),
+    )
+    body = MagicMock(spec=CreateTranscriptionRequest)
+    body.model = "stt"
+    body.response_format = response_format
+    body.stream = stream
+    return reg, await reg.execute_audio_transcriptions(body)
+
+
+async def _body_of(response: Any) -> bytes:
+    if isinstance(response, StreamingResponse):
+        return b"".join([cast("bytes", chunk) async for chunk in response.body_iterator])
+    return response.body
+
+
+@pytest.mark.parametrize("origin", ["remote", "local"])
+@pytest.mark.asyncio
+async def test_execute_audio_transcriptions_text_unwraps_json_reply(origin: str):
+    backend = StreamingResponse(
+        _async_byte_stream(b'{"text": "hello world", "usage": {"seconds": 3}}'), media_type="application/json", status_code=200
+    )
+
+    reg, result = await _transcribe("text", backend, origin)
+
+    assert result.media_type == "text/plain"
+    assert await _body_of(result) == b"hello world"
+    assert all(model.usage == 0 for model in reg.audio_transcriptions_endpoints.models["stt"].values())
+
+
+@pytest.mark.parametrize("origin", ["remote", "local"])
+@pytest.mark.asyncio
+async def test_execute_audio_transcriptions_text_passes_plain_text_reply_through(origin: str):
+    backend = StreamingResponse(_async_byte_stream(b"hello world"), media_type="text/plain", status_code=200)
+
+    _, result = await _transcribe("text", backend, origin)
+
+    assert result.media_type == "text/plain"
+    assert await _body_of(result) == b"hello world"
+
+
+@pytest.mark.parametrize("origin", ["remote", "local"])
+@pytest.mark.asyncio
+async def test_execute_audio_transcriptions_text_passes_error_through(origin: str):
+    payload = b'{"text": "nope", "error": "boom"}'
+    backend = StreamingResponse(_async_byte_stream(payload), media_type="application/json", status_code=500)
+
+    reg, result = await _transcribe("text", backend, origin)
+
+    assert result.status_code == 500
+    assert await _body_of(result) == payload
+    assert all(model.usage == 0 for model in reg.audio_transcriptions_endpoints.models["stt"].values())
+
+
+@pytest.mark.parametrize("origin", ["remote", "local"])
+@pytest.mark.parametrize("response_format", ["json", "verbose_json", "srt", "vtt", None])
+@pytest.mark.asyncio
+async def test_execute_audio_transcriptions_other_formats_pass_through(response_format: str | None, origin: str):
+    backend = StreamingResponse(_async_byte_stream(b'{"text": "hello"}'), media_type="application/json", status_code=200)
+
+    _, result = await _transcribe(response_format, backend, origin)
+
+    assert result.status_code == 200
+    assert result.media_type == "application/json"
+    assert await _body_of(result) == b'{"text": "hello"}'
+
+
+@pytest.mark.parametrize("origin", ["remote", "local"])
+@pytest.mark.asyncio
+async def test_execute_audio_transcriptions_text_with_stream_passes_through(origin: str):
+    payload = b'data: {"text": "hello"}\n\n'
+    backend = StreamingResponse(_async_byte_stream(payload), media_type="text/event-stream", status_code=200)
+
+    _, result = await _transcribe("text", backend, origin, stream=True)
+
+    assert result.media_type == "text/event-stream"
+    assert await _body_of(result) == payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", [b"not json at all", b'{"other": 1}', b'{"text": 5}', b'["text"]'])
+async def test_unwrap_json_text_replays_json_reply_without_text_field(raw: bytes) -> None:
+    response = StreamingResponse(_async_byte_stream(raw), media_type="application/json", headers={"x-test": "1"})
+    response.headers["content-length"] = str(len(raw))
+
+    result = await _unwrap_json_text(response)
+
+    assert isinstance(result, StreamingResponse)
+    assert result.media_type == "application/json"
+    assert result.status_code == 200
+    assert result.headers["x-test"] == "1"
+    assert await _collect(result.body_iterator) == raw
