@@ -10,7 +10,7 @@ import platform
 import re
 import shlex
 import shutil
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -237,6 +237,19 @@ class DockerImageNameInfo:
         return cls(registry, namespace, image_name)
 
 
+def _normalize_env_vars(env_vars: Mapping[str, object] | None) -> dict[str, str]:
+    """Return env_vars as the strings Compose made of them back when they went into the compose file as YAML scalars.
+
+    Model option factories pass raw spec values: an int from a `number` field, or None for a cleared one. None leaves
+    the variable unset, as YAML null did, and a bool becomes "true"/"false" rather than Python's "True"/"False".
+    """
+    return {
+        key: ("true" if value else "false") if isinstance(value, bool) else str(value)
+        for key, value in (env_vars or {}).items()
+        if value is not None
+    }
+
+
 class DockerOptions:
     def __init__(
         self,
@@ -248,7 +261,7 @@ class DockerOptions:
         hardware: Sequence[HardwarePartInfo] | None = None,
         volumes: list[str] | None = None,
         restart: str | None = None,
-        env_vars: dict[str, str] | None = None,
+        env_vars: Mapping[str, object] | None = None,
         api_endpoint: str | None = None,
         ulimits: dict[str, str] | None = None,
         shm_size: str | None = None,
@@ -261,7 +274,7 @@ class DockerOptions:
         self.image = image
         self.command = command
         self.image_port = image_port
-        self.env_vars = env_vars or {}
+        self.env_vars = env_vars
         self.api_endpoint = api_endpoint
         self.container_name = container_name
         self.restart = restart
@@ -273,6 +286,15 @@ class DockerOptions:
         self.healthcheck = healthcheck
         self.user = user
         self.subnet = subnet
+
+    @property
+    def env_vars(self) -> dict[str, str]:
+        """Container environment, always as strings (see _normalize_env_vars)."""
+        return self._env_vars
+
+    @env_vars.setter
+    def env_vars(self, env_vars: Mapping[str, object] | None) -> None:
+        self._env_vars = _normalize_env_vars(env_vars)
 
     @property
     def service_name(self) -> str:
