@@ -968,7 +968,7 @@ def test_doc_chunker_defaults_to_an_hour_per_document_conversion(svc: CustomServ
 
     docker_options = model.options({"hardware": "CPU"})  # pyright: ignore[reportCallIssue]
 
-    assert docker_options.env_vars["DOCUMENT_TIMEOUT"] == 3600  # pyright: ignore[reportOptionalSubscript]
+    assert docker_options.env_vars["DOCUMENT_TIMEOUT"] == "3600"  # pyright: ignore[reportOptionalSubscript]
     assert DOC_CHUNKER_PROXY_TIMEOUT_SECONDS > 3600
 
 
@@ -987,8 +987,8 @@ def test_doc_chunker_mounts_data_dir_and_sets_async_job_defaults(svc: CustomServ
 
     assert docker_options.volumes == [f"{svc.get_working_dir()}/doc_chunker/data:/var/lib/doc-chunker"]
     env_vars = docker_options.env_vars or {}
-    assert env_vars["MAX_QUEUED_JOBS"] == 100
-    assert env_vars["JOB_RESULT_TTL"] == 86400
+    assert env_vars["MAX_QUEUED_JOBS"] == "100"
+    assert env_vars["JOB_RESULT_TTL"] == "86400"
     assert "TOKENIZER_DIR" not in env_vars
 
 
@@ -1008,9 +1008,9 @@ def test_doc_chunker_passes_worker_split_to_container(svc: CustomService) -> Non
     )
 
     env_vars = docker_options.env_vars or {}
-    assert env_vars["MAX_CONCURRENT"] == 4
-    assert env_vars["ASYNC_PRIORITY_WORKERS"] == 2
-    assert env_vars["SYNC_ONLY_WORKERS"] == 1
+    assert env_vars["MAX_CONCURRENT"] == "4"
+    assert env_vars["ASYNC_PRIORITY_WORKERS"] == "2"
+    assert env_vars["SYNC_ONLY_WORKERS"] == "1"
 
 
 def test_doc_chunker_options_fall_back_to_field_defaults_for_partial_spec(svc: CustomService) -> None:
@@ -1020,9 +1020,23 @@ def test_doc_chunker_options_fall_back_to_field_defaults_for_partial_spec(svc: C
     docker_options = model.options({"hardware": "CPU"})  # pyright: ignore[reportCallIssue]
 
     env_vars = docker_options.env_vars or {}
-    assert env_vars["MAX_CONCURRENT"] == 2
-    assert env_vars["ASYNC_PRIORITY_WORKERS"] == 0
-    assert env_vars["SYNC_ONLY_WORKERS"] == 0
+    assert env_vars["MAX_CONCURRENT"] == "2"
+    assert env_vars["ASYNC_PRIORITY_WORKERS"] == "0"
+    assert env_vars["SYNC_ONLY_WORKERS"] == "0"
+
+
+def test_doc_chunker_leaves_cleared_worker_fields_unset(svc: CustomService) -> None:
+    """A number field cleared in the WebUI is sent as null - doc-chunker must fall back to its own default."""
+    model = svc.models["default"]["doc_chunker"]
+
+    docker_options = model.options(  # pyright: ignore[reportCallIssue]
+        {"hardware": "CPU", "max_concurrent": None, "async_priority_workers": None, "sync_only_workers": None}
+    )
+
+    env_vars = docker_options.env_vars or {}
+    assert "MAX_CONCURRENT" not in env_vars
+    assert "ASYNC_PRIORITY_WORKERS" not in env_vars
+    assert "SYNC_ONLY_WORKERS" not in env_vars
 
 
 @pytest.mark.parametrize(

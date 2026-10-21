@@ -590,7 +590,7 @@ class CustomService(Base2Service[InstalledInfo, DownloadedInfo]):
         # A duplicate is persisted in services.json and can't follow key rotation, so it must not carry this Infra's key.
         infra_api_key = self.config.infra_api_key.get_secret_value()
         envs = (
-            {key: "" if infra_api_key and str(value) == infra_api_key else str(value) for key, value in docker_options.env_vars.items()}
+            {key: "" if infra_api_key and value == infra_api_key else value for key, value in docker_options.env_vars.items()}
             if docker_options.env_vars
             else None
         )
@@ -609,10 +609,6 @@ class CustomService(Base2Service[InstalledInfo, DownloadedInfo]):
             # container path - strip the host side back off so it gets that raw form, not a
             # three-segment, two-colon string Compose can't parse.
             "volumes": [v.split(":", 1)[1] if ":" in v else v for v in (docker_options.volumes or [])],
-            # `generate_docker_options` callables (e.g. lemmatizer/bge_m3/doc_chunker) default several
-            # env vars to actual int/bool literals, not strings - `SrvCustomCustomModel.envs` is
-            # `dict[str, str]`, so these must be stringified or add_custom_model's validation rejects
-            # them ("envs.<key>: Input should be a valid string").
             "envs": envs,
             "healthcheck_cmd": healthcheck.get("test"),
             "healthcheck_start_period": healthcheck.get("start_period"),

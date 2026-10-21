@@ -911,6 +911,46 @@ async def test_generate_docker_compose_content_escapes_dollar_signs_in_env(
     assert options.env_vars == {"KEY": value}
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        pytest.param(4, "4", id="int"),
+        pytest.param(True, "true", id="true"),
+        pytest.param(False, "false", id="false"),
+        pytest.param(0.5, "0.5", id="float"),
+        pytest.param("1$", "1$", id="str"),
+    ],
+)
+def test_docker_options_stringifies_env_values(value: object, expected: str) -> None:
+    options = _opts(env_vars={"KEY": value})
+
+    assert options.env_vars == {"KEY": expected}
+
+
+def test_docker_options_drops_none_env_values() -> None:
+    options = _opts(env_vars={"UNSET": None, "SET": 2})
+
+    assert options.env_vars == {"SET": "2"}
+
+
+def test_docker_options_normalizes_assigned_env_vars() -> None:
+    options = _opts()
+
+    options.env_vars = {"WORKERS": 4, "UNSET": None}
+
+    assert options.env_vars == {"WORKERS": "4"}
+
+
+@pytest.mark.asyncio
+async def test_generate_docker_compose_content_escapes_non_str_env_values(docker_service: DockerService) -> None:
+    options = _opts(env_vars={"WORKERS": 4, "PRICE": "1$", "UNSET": None})
+
+    result = await docker_service.generate_docker_compose_content(options, 12345)
+
+    assert result["services"]["mymodel"]["environment"] == {"WORKERS": "4", "PRICE": "1$$"}  # pyright: ignore[reportTypedDictNotRequiredAccess]
+    assert _container_env_matches(["WORKERS=4", "PRICE=1$"], options.env_vars) is True
+
+
 @pytest.mark.asyncio
 async def test_generate_docker_compose_content_escapes_dollar_signs_in_every_env_key(docker_service: DockerService) -> None:
     options = _opts(env_vars={"A": "a$a", "B": "b$b", "C": "plain"})
