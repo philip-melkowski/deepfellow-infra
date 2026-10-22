@@ -3,19 +3,21 @@
 
 """Model tester."""
 
+import asyncio
 import base64
 import io
 import json
 import wave
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, NoReturn, cast
 
+import aiohttp
 from fastapi import UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from starlette.datastructures import Headers
 from starlette.requests import Request
 
-from server.endpointregistry import ChatCompletionEndpoint, McpEndpoint, RegistryEntry, SimpleEndpoint
+from server.endpointregistry import ChatCompletionEndpoint, CustomEndpoint, McpEndpoint, RegistryEntry, SimpleEndpoint
 from server.models.api import (
     ALL_LLM_SUFFIXES,
     ChatCompletionRequest,
@@ -40,6 +42,26 @@ LLM_TEST_HANDLERS = {
     "v2": "_test_chat_completions",
     "v1": "_test_completions",
 }
+# Health routes probed in order for custom models: ours serve /health, BentoML serves /healthz.
+CUSTOM_HEALTH_PATHS = ("health", "healthz")
+# Optional self-test route a custom model image may expose. Contract: GET without body, side-effect free and cheap
+# (the /custom proxy exposes every container route to API-key holders, so it can be called repeatedly), returns 200 when
+# the model works and a short text/JSON verdict as the body (no media, no secrets).
+CUSTOM_TEST_PATH = "test_model"
+# Caps on the custom checks: their bodies are short verdicts, and a buggy image must not stream into Infra's memory or hang the test.
+CUSTOM_TEST_MAX_BYTES = 64 * 1024
+CUSTOM_TEST_TIMEOUT_SECONDS = 30
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("Duplicate JSON keys")
+    return result
+
+
+def _reject_constant(name: str) -> NoReturn:
+    raise ValueError(f"Non-standard JSON constant {name}")  # noqa: EM102
 
 
 class Response(NamedTuple):
@@ -63,6 +85,20 @@ class ModelTestError(Exception):
         self.response = response
 
 
+def _as_json_if_lossless(response: Response | None, text: str | None) -> object:
+    """Return a declared-JSON body parsed so the UI shows it as structure, else the verbatim text.
+
+    Falls back to text whenever parsing would alter the body: duplicate keys (all but the last would be dropped)
+    or NaN/Infinity (not valid JSON, and the JSON response could not serialize them).
+    """
+    if response is None or response.media_type != "application/json":
+        return text
+    try:
+        return json.loads(cast("str", text), object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_constant)
+    except ValueError:
+        return text
+
+
 class ModelTester:
     async def test_model(self, entry: RegistryEntry) -> JsonSerializable:
         """Test model."""
@@ -71,16 +107,14 @@ class ModelTester:
         except ModelTestError as e:
             result: dict[str, Any] = {"error": e.error}
             if e.response:
-                details = {
+                details: dict[str, object] = {
                     "status_code": e.response.status_code,
                     "content_type": e.response.media_type,
                 }
-                details["data"] = "binary"
                 try:
-                    details["data"] = e.response.content.decode("utf-8")
-                    details["data"] = json.loads(details["data"])
-                except Exception:
-                    pass
+                    details["data"] = _as_json_if_lossless(e.response, e.response.content.decode("utf-8"))
+                except UnicodeDecodeError:
+                    details["data"] = "binary"
                 result["details"] = details
             return result
         except Exception:
@@ -107,7 +141,7 @@ class ModelTester:
         if entry.registered_model.type == "mcp":
             return await self._test_mcp(entry.registered_model.name, entry.registered_model.endpoint)
         if entry.registered_model.type == "custom":
-            raise ModelTestError("Custom model cannot be tested")
+            return await self._test_custom(entry.registered_model.name, entry.registered_model.endpoint)
         raise RuntimeError(f"Given model cannot be tested, unsupported type {entry.registered_model.type}")  # noqa: EM102
 
     async def _test_messages(self, model: str, endpoint: ChatCompletionEndpoint) -> JsonSerializable:
@@ -258,7 +292,55 @@ class ModelTester:
         except Exception:
             raise ModelTestError("Cannot read image data", my_resp)  # noqa: B904
 
-    def _make_mcp_request(self, body: bytes, extra_headers: list[tuple[bytes, bytes]] | None = None) -> Request:
+    async def _test_custom(self, prefix: str, endpoint: CustomEndpoint) -> JsonSerializable:
+        """Run the health probe and the optional self-test; at least one must exist and every existing one must pass."""
+        try:
+            async with asyncio.timeout(CUSTOM_TEST_TIMEOUT_SECONDS):
+                health = await self._probe_custom_health(prefix, endpoint)
+                test = await self._get_custom(prefix, endpoint, CUSTOM_TEST_PATH)
+        except TimeoutError:
+            raise ModelTestError(f"Model test timed out (limit {CUSTOM_TEST_TIMEOUT_SECONDS} s)") from None  # noqa: EM102
+        if test.status_code == 404:
+            test = None
+        elif test.status_code != 200:
+            raise ModelTestError("Model test failed", test)
+        if not health and not test:
+            paths = ", ".join(f"/{path}" for path in (*CUSTOM_HEALTH_PATHS, CUSTOM_TEST_PATH))
+            raise ModelTestError(f"No health or test endpoint found (tried: {paths})")  # noqa: EM102
+        health_output = health.content.decode("utf-8", errors="replace") if health else None
+        test_output = test.content.decode("utf-8", errors="replace") if test else None
+        return {
+            "result": "ok",
+            "output": (test_output or "passed") if test else (health_output or "healthy"),
+            "details": {
+                "health": _as_json_if_lossless(health, health_output),
+                "test_model": _as_json_if_lossless(test, test_output),
+            },
+        }
+
+    async def _probe_custom_health(self, prefix: str, endpoint: CustomEndpoint) -> Response | None:
+        """Return the first health response that isn't 404, or None when the model defines no health route."""
+        for path in CUSTOM_HEALTH_PATHS:
+            health = await self._get_custom(prefix, endpoint, path)
+            # Only a missing route falls through; any other non-200 is the service reporting itself unhealthy.
+            if health.status_code == 404:
+                continue
+            if health.status_code != 200:
+                raise ModelTestError("Health check failed", health)
+            return health
+        return None
+
+    async def _get_custom(self, prefix: str, endpoint: CustomEndpoint, path: str) -> Response:
+        try:
+            response = await endpoint.on_request(self._make_request(b"", method="GET", full_path=f"{prefix}/{path}"))
+        except aiohttp.ClientError as e:
+            # Typically a container that is still starting: show it instead of a generic internal error.
+            raise ModelTestError(f"Model unreachable: {e}") from e  # noqa: EM102
+        return await self._read_response(response, max_bytes=CUSTOM_TEST_MAX_BYTES)
+
+    def _make_request(
+        self, body: bytes, extra_headers: list[tuple[bytes, bytes]] | None = None, method: str = "POST", full_path: str = "/"
+    ) -> Request:
         headers: list[tuple[bytes, bytes]] = [
             (b"content-type", b"application/json"),
             (b"accept", b"application/json, text/event-stream"),
@@ -266,13 +348,13 @@ class ModelTester:
         ]
         scope: dict[str, Any] = {
             "type": "http",
-            "method": "POST",
+            "method": method,
             "path": "/",
             "query_string": b"",
             "scheme": "http",
             "server": ("localhost", 80),
             "headers": headers,
-            "path_params": {"full_path": "/"},
+            "path_params": {"full_path": full_path},
         }
 
         async def receive() -> dict[str, Any]:
@@ -319,7 +401,7 @@ class ModelTester:
                 },
             }
         ).encode()
-        init_response = await endpoint.on_request(self._make_mcp_request(init_payload))
+        init_response = await endpoint.on_request(self._make_request(init_payload))
         session_id: str | None = None
         if isinstance(init_response, StreamingResponse):
             session_id = init_response.headers.get("mcp-session-id")
@@ -340,7 +422,7 @@ class ModelTester:
             }
         ).encode()
         try:
-            tools_response = await endpoint.on_request(self._make_mcp_request(tools_payload, extra_headers))
+            tools_response = await endpoint.on_request(self._make_request(tools_payload, extra_headers))
             (_, tools_data) = await self._read_mcp_response(tools_response, 2)
             tools: list[Any] | None = tools_data.get("result", {}).get("tools")
         except ModelTestError as e:
@@ -378,8 +460,8 @@ class ModelTester:
             raise ModelTestError(error="Invalid status code", response=my_resp)
         return my_resp
 
-    async def _read_response(self, response: StarletteResponse) -> Response:
-        """Read response and return content and content type."""
+    async def _read_response(self, response: StarletteResponse, max_bytes: int | None = None) -> Response:
+        """Read response and return content and content type, failing once the body exceeds `max_bytes`."""
         if isinstance(response, StreamingResponse):
             content = bytearray()
             async for chunk in response.body_iterator:
@@ -387,6 +469,12 @@ class ModelTester:
                     content += chunk
                 else:
                     raise TypeError("There is no bytes in StreamingResponse")
+                if max_bytes is not None and len(content) > max_bytes:
+                    # Close the stream so the proxied upstream connection is released instead of left half-read.
+                    aclose = getattr(response.body_iterator, "aclose", None)
+                    if aclose:
+                        await aclose()
+                    raise ModelTestError(f"Response too large (limit {max_bytes // 1024} KB)")  # noqa: EM102
             return Response(
                 status_code=response.status_code,
                 content=bytes(content),

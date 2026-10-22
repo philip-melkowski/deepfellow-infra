@@ -29,6 +29,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Test** button in the WebUI now works for custom models: it checks `GET /health` (or `/healthz`) and the optional `GET /test_model` self-test route.
 - vLLM GPU image version list now also offers plain release tags such as `v0.31.0`.
 - `just dev` no longer keeps a CPU core busy watching for file changes.
 - `$` in container environment values is now escaped, so `pa$word` reaches the container intact; `${VAR}` is no longer expanded. Existing containers pick this up on next start; bge-m3, lemmatizer and doc-chunker containers are recreated once.
