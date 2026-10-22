@@ -5,6 +5,7 @@
 
 import asyncio
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
@@ -18,11 +19,13 @@ from scripts.get_huggingface_models import (
     RERANKER_TAGS,
     HfRepoAccessError,
     ModelIncompatibleError,
+    _drop_unsupported_models,  # pyright: ignore[reportPrivateUsage]
     _gated_probe_file,  # pyright: ignore[reportPrivateUsage]
     classify_modality_support,
     collect_embedding_models,
     collect_llm_models,
     collect_reranker_models,
+    collect_stt_models,
     fetch_model_details,
     fetch_model_metadata,
     fetch_popular_embedding_models,
@@ -36,9 +39,11 @@ from scripts.get_huggingface_models import (
     is_embedding,
     is_llm,
     is_mlx,
+    is_non_servable_stt_repo,
     is_reranker,
     is_reranking_cross_encoder,
     is_supported_cross_encoder,
+    is_supported_stt,
     is_test_fixture,
     main,
     validate_model_compatibility,
@@ -326,6 +331,26 @@ async def test_validate_model_compatibility_raises_for_unsupported_reranker_arch
 
     with pytest.raises(ModelIncompatibleError, match="cross-encoder"):
         await validate_model_compatibility(session, "org/generative-reranker", None, "reranker")
+
+
+@pytest.mark.asyncio
+async def test_validate_model_compatibility_raises_for_unsupported_stt_architecture() -> None:
+    session = _make_mock_session(
+        {"id": "facebook/wav2vec2-base", "tags": [], "siblings": [], "config": {"architectures": ["Wav2Vec2ForCTC"]}}
+    )
+
+    with pytest.raises(ModelIncompatibleError, match="audio/transcriptions"):
+        await validate_model_compatibility(session, "facebook/wav2vec2-base", None, "stt")
+
+
+@pytest.mark.asyncio
+async def test_validate_model_compatibility_passes_for_supported_stt() -> None:
+    data = {"id": "openai/whisper-small", "tags": [], "siblings": [], "config": {"architectures": ["WhisperForConditionalGeneration"]}}
+    session = _make_mock_session(data)
+
+    result = await validate_model_compatibility(session, "openai/whisper-small", None, "stt")
+
+    assert result == data
 
 
 @pytest.mark.asyncio
@@ -687,6 +712,40 @@ async def test_fetch_popular_models_passes_correct_params() -> None:
     assert params["pipeline_tag"] == "text-generation"
     assert params["sort"] == "likes"
     assert params["limit"] == "50"
+
+
+@pytest.mark.asyncio
+async def test_fetch_popular_models_passes_extra_filter() -> None:
+    session = _make_mock_session([])
+
+    await fetch_popular_models(session, "automatic-speech-recognition", "downloads", 10, extra_filter="whisper")
+
+    params = session.get.call_args[1]["params"]
+    assert params["filter"] == "whisper"
+
+
+@pytest.mark.asyncio
+async def test_fetch_popular_models_omits_filter_without_extra_filter() -> None:
+    session = _make_mock_session([])
+
+    await fetch_popular_models(session, "text-generation", "downloads", 10)
+
+    params = session.get.call_args[1]["params"]
+    assert "filter" not in params
+
+
+def test_drop_unsupported_models_keeps_all_stts_when_all_supported() -> None:
+    models = [{"id": "openai/whisper-small"}, {"id": "openai/whisper-base"}]
+    architectures: dict[str, list[str] | None] = {
+        "openai/whisper-small": ["WhisperForConditionalGeneration"],
+        "openai/whisper-base": ["WhisperForConditionalGeneration"],
+    }
+    log = MagicMock()
+
+    result = _drop_unsupported_models("stts", models, architectures, {}, log)
+
+    assert result == models
+    assert log.call_count == 0
 
 
 @pytest.mark.asyncio
@@ -1612,3 +1671,90 @@ async def test_fetch_registry_entries_raises_without_any_active_criterion() -> N
     session = MagicMock()
     with pytest.raises(ValueError, match="Specify at least one"):
         await fetch_registry_entries(session, 0, 0, 0, "llm", log=lambda _msg: None)
+
+
+def test_is_supported_stt_accepts_whisper_and_rejects_ctc() -> None:
+    assert is_supported_stt(["WhisperForConditionalGeneration"])
+    assert not is_supported_stt(["Wav2Vec2ForCTC"])
+    assert not is_supported_stt([])
+
+
+@pytest.mark.asyncio
+async def test_collect_stt_models_deduplicates_and_skips_gguf_and_mlx() -> None:
+    async def fake_fetch(session: Mock, tag: str, sort: str, limit: int, extra_filter: str | None = None) -> list[dict[str, Any]]:
+        assert tag == "automatic-speech-recognition"
+        return [{"id": "openai/whisper-small"}, {"id": "mlx-community/whisper-tiny"}, {"id": "org/whisper-gguf", "tags": ["gguf"]}]
+
+    with patch("scripts.get_huggingface_models.fetch_popular_models", side_effect=fake_fetch):
+        result = await collect_stt_models(MagicMock(), {"downloads": 10, "trendingScore": 10})
+
+    assert [m["id"] for m in result] == ["openai/whisper-small"]
+
+
+@pytest.mark.asyncio
+async def test_collect_stt_models_logs_prefiltered_count() -> None:
+    async def fake_fetch(session: Mock, tag: str, sort: str, limit: int, extra_filter: str | None = None) -> list[dict[str, Any]]:
+        return [{"id": "openai/whisper-small"}, {"id": "mlx-community/whisper-tiny"}, {"id": "onnx-community/whisper-tiny"}]
+
+    log = MagicMock()
+    with patch("scripts.get_huggingface_models.fetch_popular_models", side_effect=fake_fetch):
+        await collect_stt_models(MagicMock(), {"downloads": 10, "trendingScore": 10}, log)
+
+    assert log.call_args_list == [call("Dropped 2 STT candidate(s) as gguf/mlx/ONNX/CoreML/aligner/test repos before ranking.")]
+
+
+def test_is_non_servable_stt_repo_flags_onnx_and_aligners() -> None:
+    assert is_non_servable_stt_repo({"id": "onnx-community/whisper-tiny"})
+    assert is_non_servable_stt_repo({"id": "Xenova/whisper-tiny"})
+    assert is_non_servable_stt_repo({"id": "argmaxinc/whisperkit-coreml", "tags": ["coreml"]})
+    assert not is_non_servable_stt_repo({"id": "distil-whisper/distil-large-v3", "tags": ["onnx", "transformers.js", "safetensors"]})
+    assert is_non_servable_stt_repo({"id": "Qwen/Qwen3-ForcedAligner-0.6B"})
+    assert not is_non_servable_stt_repo({"id": "openai/whisper-small", "tags": ["transformers"]})
+
+
+@pytest.mark.asyncio
+async def test_collect_stt_models_ranks_families_globally_and_cuts_to_limit() -> None:
+    async def fake_fetch(session: Mock, tag: str, sort: str, limit: int, extra_filter: str | None = None) -> list[dict[str, Any]]:
+        if extra_filter == "whisper":
+            return [{"id": "a/whisper-1", "downloads": 100}, {"id": "a/whisper-2", "downloads": 10}]
+        if extra_filter == "qwen3_asr":
+            return [{"id": "a/qwen-asr", "downloads": 50}, {"id": "a/whisper-1", "downloads": 100}]
+        return []
+
+    with patch("scripts.get_huggingface_models.fetch_popular_models", side_effect=fake_fetch):
+        result = await collect_stt_models(MagicMock(), {"downloads": 2})
+
+    assert [m["id"] for m in result] == ["a/whisper-1", "a/qwen-asr"]
+
+
+@pytest.mark.asyncio
+async def test_main_stt_drops_unsupported_architectures(capsys: pytest.CaptureFixture[str]) -> None:
+    models = [{"id": "openai/whisper-small"}, {"id": "facebook/wav2vec2-base"}, {"id": "org/unfetched"}]
+    architectures: dict[str, list[str] | None] = {
+        "openai/whisper-small": ["WhisperForConditionalGeneration"],
+        "facebook/wav2vec2-base": ["Wav2Vec2ForCTC"],
+        "org/unfetched": None,
+    }
+
+    async def fake_collect(session: Mock, active: dict[str, int], _log: Callable[[str], None]) -> list[dict[str, str]]:
+        return models
+
+    async def fake_details(
+        session: Mock, model_id: str, sem: asyncio.Semaphore, check_chat_template: bool = False, cache_dir: Path | None = None
+    ) -> tuple[str, str, list[str] | None, bool]:
+        return model_id, "1.0 GB", architectures[model_id], True
+
+    with (
+        patch("scripts.get_huggingface_models.collect_stt_models", side_effect=fake_collect),
+        patch("scripts.get_huggingface_models.fetch_model_details", side_effect=fake_details),
+        patch(
+            "aiohttp.ClientSession",
+            return_value=AsyncMock(__aenter__=AsyncMock(return_value=MagicMock()), __aexit__=AsyncMock(return_value=False)),
+        ),
+    ):
+        await main(10, 0, 0, raw=False, model_type="stt")
+
+    out = capsys.readouterr()
+    data = json.loads(out.out)
+    assert [e["name"] for e in data["stts"]] == ["openai/whisper-small"]
+    assert "Dropped 2 STT candidate" in out.err

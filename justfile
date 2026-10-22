@@ -190,6 +190,7 @@ get-vllm-models *FLAGS:
     uv run python -m scripts.get_huggingface_models --type llm --top-by-downloads 200 --top-by-likes 200 --top-by-trending 50 --output static/vllm-min.json {{FLAGS}}
     uv run python -m scripts.get_huggingface_models --type reranker --top-by-downloads 10 --top-by-trending 10 --output static/vllm-min.json {{FLAGS}}
     uv run python -m scripts.get_huggingface_models --type embedding --top-by-downloads 10 --top-by-trending 10 --output static/vllm-min.json {{FLAGS}}
+    uv run python -m scripts.get_huggingface_models --type stt --top-by-downloads 50 --top-by-trending 10 --output static/vllm-min.json {{FLAGS}}
 
 get-llamacpp-models *FLAGS:
     uv run python -m scripts.get_llamacpp_models --top-by-downloads 200 --top-by-likes 100 --top-by-trending 50 --output static/llamacpp-min.json {{FLAGS}}

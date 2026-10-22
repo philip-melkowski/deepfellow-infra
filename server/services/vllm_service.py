@@ -30,7 +30,7 @@ from server.docker import (
     DockerOptions,
 )
 from server.endpointregistry import CapacityState, ProxyOptions, RegistrationId, RegistrationOptions
-from server.models.api import EMBEDDINGS_ENDPOINTS, LLM_ENDPOINTS, ModelProps
+from server.models.api import EMBEDDINGS_ENDPOINTS, LLM_ENDPOINTS, STT_ENDPOINTS, ModelProps
 from server.models.models import (
     CustomModelField,
     CustomModelId,
@@ -90,6 +90,7 @@ _VLLM_FETCH_PLAN: list[tuple[int, int, int, str, bool]] = [
     (200, 200, 50, "llm", False),
     (10, 0, 10, "reranker", False),
     (10, 0, 10, "embedding", False),
+    (50, 0, 10, "stt", False),
 ]
 
 # vLLM's `--quantization` engine argument choices, as reported by this pinned image's own
@@ -167,6 +168,9 @@ def _is_truthy_flag(value: Any) -> bool:  # noqa: ANN401
     return bool(value)
 
 
+type VllmModelType = Literal["llm", "reranker", "embedding", "stt"]
+
+
 def _hf_source(spec: dict[str, Any]) -> tuple[Any, Any, Any]:
     """Return the custom-model spec fields the HuggingFace validation depends on: repo, revision, model type.
 
@@ -188,7 +192,7 @@ class VllmModel(BaseModel):
     gpu_memory_utilization: float | None = None
     size: str
     custom: CustomModelId | None = None
-    model_type: Literal["llm", "reranker", "embedding"] = "llm"
+    model_type: VllmModelType = "llm"
     adapter_id: str | None = None
     """df-finetune adapter id this model serves as a LoRA on top of `hf_id`, if any."""
     lora_rank: int | None = None
@@ -205,7 +209,7 @@ class VllmCustomModel(BaseModel):
     hf_id: str
     revision: str | None = None
     size: str
-    model_type: Literal["llm", "reranker", "embedding"] = "llm"
+    model_type: VllmModelType = "llm"
     skip_validation: bool = False
     adapter_id: str | None = None
     lora_rank: int | None = None
@@ -229,6 +233,7 @@ class VllmRegistry(TypedDict, total=False):
     llms: list[VllmLlmRegistryEntry]
     rerankers: list[VllmRegistryEntry]
     embeddings: list[VllmRegistryEntry]
+    stts: list[VllmRegistryEntry]
 
 
 class VllmConst(BaseModel):
@@ -272,6 +277,12 @@ def _read_models() -> dict[str, VllmModel]:
                 size=entry["size"],
                 model_type="embedding",
             )
+        for entry in registry.get("stts", []):
+            map[entry["name"]] = VllmModel(
+                hf_id=entry["name"],
+                size=entry["size"],
+                model_type="stt",
+            )
         return map
 
 
@@ -297,7 +308,7 @@ class ModelInstalledInfo:
     model_path: Path
     base_url: str
     gpu_memory_utilization: float | None
-    model_type: Literal["llm", "reranker", "embedding"] = "llm"
+    model_type: VllmModelType = "llm"
     capacity: int | None = None
     capacity_known: bool = False
 
@@ -370,7 +381,7 @@ class VllmService(Base2Service[InstalledInfo, DownloadedInfo]):
         return None
 
     async def refresh_catalog(self) -> PromiseWithProgress[CatalogRefreshOut, StreamChunk]:
-        """Fetch current top vLLM-compatible LLM/reranker/embedding models from HuggingFace.
+        """Fetch current top vLLM-compatible LLM/reranker/embedding/STT models from HuggingFace.
 
         Runs as a background job (dozens-to-hundreds of HTTP requests) and, on success, writes the
         merged registry to `static/vllm-min.json` and reloads `_const.models` in memory. Failure
@@ -528,9 +539,10 @@ class VllmService(Base2Service[InstalledInfo, DownloadedInfo]):
                         required=False,
                     ),
                 )
+        if model_type != "stt":
+            fields.append(ModelField(type="number", name="max_model_length", description="Max model length ex. 4096", required=False))
         fields.extend(
             [
-                ModelField(type="number", name="max_model_length", description="Max model length ex. 4096", required=False),
                 ModelField(
                     type="oneof",
                     name="quantization",
@@ -590,7 +602,7 @@ class VllmService(Base2Service[InstalledInfo, DownloadedInfo]):
                     type="oneof",
                     name="model_type",
                     description="Model type",
-                    values=["llm", "reranker", "embedding"],
+                    values=["llm", "reranker", "embedding", "stt"],
                     default="llm",
                     required=False,
                 ),
@@ -873,10 +885,7 @@ class VllmService(Base2Service[InstalledInfo, DownloadedInfo]):
         await self.docker_service.uninstall_docker(model_info.docker)
         self._release_gpu_utilization(model_info.gpu_memory_utilization)
         info.models.pop(model_id, None)
-        if model_info.model_type == "reranker":
-            self.endpoint_registry.unregister_rerank(model_info.registered_name, model_info.registration_id)
-        else:
-            self.endpoint_registry.unregister_chat_completion(model_info.registered_name, model_info.registration_id)
+        self._unregister_model_endpoint(model_info)
         await self._save()
 
     def get_docker_options(self, instance: str, model_id: str | None) -> DockerOptions:
@@ -1263,6 +1272,18 @@ class VllmService(Base2Service[InstalledInfo, DownloadedInfo]):
 
         return cmd
 
+    def _unregister_model_endpoint(self, model_info: ModelInstalledInfo) -> None:
+        """Remove the model's registration from the endpoint registry based on its type."""
+        name, registration_id = model_info.registered_name, model_info.registration_id
+        if model_info.model_type == "reranker":
+            self.endpoint_registry.unregister_rerank(name, registration_id)
+        elif model_info.model_type == "embedding":
+            self.endpoint_registry.unregister_embeddings(name, registration_id)
+        elif model_info.model_type == "stt":
+            self.endpoint_registry.unregister_audio_transcriptions(name, registration_id)
+        else:
+            self.endpoint_registry.unregister_chat_completion(name, registration_id)
+
     def _register_model_endpoint(
         self,
         model_info: "ModelInstalledInfo",
@@ -1292,6 +1313,15 @@ class VllmService(Base2Service[InstalledInfo, DownloadedInfo]):
                 model=registered_name,
                 props=ModelProps(private=True, type="embedding", endpoints=EMBEDDINGS_ENDPOINTS),
                 options=ProxyOptions(url=f"{model_info.base_url}/v1/embeddings", rewrite_model_to=model_id),
+                registration_options=RegistrationOptions(
+                    origin="local", alias=registered_alias, owned_by=self.get_type(), capacity_state=capacity_state
+                ),
+            )
+        if model.model_type == "stt":
+            return self.endpoint_registry.register_audio_transcriptions_as_proxy(
+                model=registered_name,
+                props=ModelProps(private=True, type="stt", endpoints=STT_ENDPOINTS),
+                options=ProxyOptions(url=f"{model_info.base_url}/v1/audio/transcriptions", rewrite_model_to=model_id),
                 registration_options=RegistrationOptions(
                     origin="local", alias=registered_alias, owned_by=self.get_type(), capacity_state=capacity_state
                 ),
@@ -1609,12 +1639,7 @@ class VllmService(Base2Service[InstalledInfo, DownloadedInfo]):
             model = info.models[model_id]
             self._release_gpu_utilization(model.gpu_memory_utilization)
             del info.models[model_id]
-            if model.model_type == "reranker":
-                self.endpoint_registry.unregister_rerank(model.registered_name, model.registration_id)
-            elif model.model_type == "embedding":
-                self.endpoint_registry.unregister_embeddings(model.registered_name, model.registration_id)
-            else:
-                self.endpoint_registry.unregister_chat_completion(model.registered_name, model.registration_id)
+            self._unregister_model_endpoint(model)
             await self.docker_service.uninstall_docker(model.docker)
 
         if options.purge and model_id in self.models_downloaded:
