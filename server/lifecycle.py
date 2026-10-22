@@ -146,7 +146,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     shutdown_steps: list[tuple[str, Callable[[], Awaitable[None]]]] = [("drain warning tasks", services_manager.drain_warning_tasks)]
     if config.is_stop_containers_on_shutdown_enabled():
         shutdown_steps.append(("stop services", services_manager.stop_all_services))
-    shutdown_steps += [("tracer", tracer.shutdown), ("OTLP logging", otlp_logging.teardown), ("Sentry", sentry.shutdown)]
+    shutdown_steps += [("tracer", tracer.close), ("OTLP logging", otlp_logging.close), ("Sentry", sentry.shutdown)]
     # Each step is isolated so one failure doesn't skip the teardown of the remaining services.
     for name, step in shutdown_steps:
         try:
