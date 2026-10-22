@@ -53,6 +53,11 @@ class OtlpLoggingManager:
     def __init__(self) -> None:
         self._handler: LoggingHandler | None = None
         self._provider: LoggerProvider | None = None
+        # Serializes teardown()/reconfigure() so overlapping calls can't interleave across the
+        # `await` on the provider shutdown. Not held by the sync `setup()`.
+        self._lock = asyncio.Lock()
+        # Set by `close()` at app exit; makes `setup()`/`reconfigure()` no-ops so nothing is rebuilt after.
+        self._closed = False
 
         # Last confirmed-applied logging config, not `config` itself — `config` gets overwritten
         # regardless of success, which would hide a still-pending change from a retry.
@@ -64,8 +69,10 @@ class OtlpLoggingManager:
 
         Idempotent: calling this again after `teardown()` rebuilds the exporter with the current
         `config.otel_exporter_otlp_endpoint`, so it can be re-applied when that value changes via
-        `/admin/config` without a process restart.
+        `/admin/config` without a process restart. No-op after `close()`.
         """
+        if self._closed:
+            return
         resource = Resource(attributes={"service.name": "llm-audit"})
         provider = self._provider = LoggerProvider(resource=resource)
         processor = BatchLogRecordProcessor(OTLPLogExporter(endpoint=config.otel_exporter_otlp_endpoint, insecure=True))
@@ -89,7 +96,7 @@ class OtlpLoggingManager:
         up to our own bound — if the shutdown is still slow, it keeps finishing on its own thread
         instead of blocking this one.
 
-        Called from `teardown()` (already off the event loop thread via `asyncio.to_thread()`).
+        Called from `_teardown_locked()` (already off the event loop thread via `asyncio.to_thread()`).
         """
         thread = threading.Thread(target=self._run_provider_shutdown, args=(provider,), daemon=True)
         thread.start()
@@ -98,10 +105,8 @@ class OtlpLoggingManager:
     def _run_provider_shutdown(self, provider: LoggerProvider) -> None:
         """Run `LoggerProvider.shutdown()`, logging (not propagating) any exception it raises.
 
-        Never letting this raise is what makes `teardown()`'s `self._provider = None` reset
-        unconditional — a failed shutdown is logged here and then treated as done, so the next
-        `teardown()` call doesn't retry a provider that's already been given up on, but also isn't
-        left permanently unreachable by an early-return guarded on unrelated state (see `teardown()`).
+        Never raising lets `_teardown_locked()` always reset `self._provider` afterwards (unless a newer one was
+        installed meanwhile): a failed shutdown is logged and treated as done, not retried.
         """
         try:
             provider.shutdown()
@@ -109,11 +114,30 @@ class OtlpLoggingManager:
             logger.warning("Failed to shut down OTel log provider", exc_info=True)
 
     async def teardown(self) -> None:
-        """Detach the OTLP log handler previously attached by `setup()`, if any.
+        """Detach the OTLP log handler previously attached by `setup()`, if any."""
+        async with self._lock:
+            await self._teardown_locked()
+
+    async def close(self) -> None:
+        """Tear down for good at app exit: like `teardown()`, but nothing can be set up again afterwards.
+
+        The flag is set before waiting for the lock, so a `reconfigure()` queued behind this call
+        (or arriving later) can't rebuild a provider that nothing would shut down.
+        """
+        self._closed = True
+        await self.teardown()
+
+    async def _teardown_locked(self) -> None:
+        """`teardown()` body; the caller must hold `self._lock`.
 
         Handler cleanup and provider cleanup are independent `if` blocks (not one `self._handler is
         None` guard covering both) — otherwise a provider left over from a previously failed shutdown
         would never be retried once the handler had already been cleared on that earlier attempt.
+
+        `setup()` is sync and never takes the lock, so a direct call could still land during the await.
+        In that case the new provider (and its `configured_*` state) is deliberately left running rather
+        than torn down by this call. The in-app callers can't hit this: `lifecycle.py` calls `setup()`
+        once at startup and `reconfigure()` calls it under the lock.
         """
         if self._handler is not None:
             for name in _OTLP_LOG_HANDLER_LOGGER_NAMES:
@@ -123,8 +147,13 @@ class OtlpLoggingManager:
         # Stop the old BatchLogRecordProcessor's background export thread — otherwise every
         # reconfigure() leaks one more thread that outlives its now-detached handler forever. Run off
         # the event loop thread since the shutdown itself may block; see `_shutdown_provider()`.
-        if self._provider is not None:
-            await asyncio.to_thread(self._shutdown_provider, self._provider)
+        provider = self._provider
+        if provider is not None:
+            await asyncio.to_thread(self._shutdown_provider, provider)
+            # Only clear if still the provider we shut down; never drop one installed meanwhile.
+            if self._provider is not provider:
+                # A `setup()` ran during the await and already recorded its own `configured_*` state.
+                return
             self._provider = None
 
         # _run_provider_shutdown() never raises, so this always reflects reality once reached.
@@ -132,9 +161,12 @@ class OtlpLoggingManager:
 
     async def reconfigure(self, config: AppSettings) -> None:
         """Apply an `otel_logging_enabled`/`otel_exporter_otlp_endpoint` change without a restart."""
-        await self.teardown()
-        if config.otel_logging_enabled:
-            self.setup(config)
+        async with self._lock:
+            if self._closed:
+                return
+            await self._teardown_locked()
+            if config.otel_logging_enabled:
+                self.setup(config)
 
 
 class FuncArgs:
@@ -170,6 +202,16 @@ class InfraTracer:
         self._meter_provider: MeterProvider | None = None
         self._meter_endpoint: str | None = None
         self._mcp_instruments: McpInstruments | None = None
+        # asyncio.Lock binds to the running loop on first contention, and `tracer` is a module-level
+        # singleton: contending shutdown() from a second event loop (e.g. across pytest loops) raises
+        # RuntimeError. Fine under uvicorn's single loop per process.
+        # Serializes shutdown() against itself. The lazy rebuilds in `_get_tracer()`/
+        # `_get_mcp_instruments()` are sync and can't take it, so shutdown() additionally only clears
+        # state whose provider is still the one it shut down.
+        self._lock = asyncio.Lock()
+        # Set by `close()` at app exit; makes `span()`/`mcp_instruments()`/`trace_request()` skip tracing
+        # so no provider is rebuilt after the final `shutdown()`.
+        self._closed = False
 
     def _get_config(self) -> AppSettings:
         if self.config is None:
@@ -307,30 +349,50 @@ class InfraTracer:
         otherwise the `BatchSpanProcessor`/`PeriodicExportingMetricReader` export threads built by
         `_get_tracer()`/`_get_mcp_instruments()` keep running (and exporting to the OTLP endpoint)
         even though nothing references them anymore. Resets provider state so a later call rebuilds
-        fresh providers rather than reusing shut-down ones.
+        fresh providers rather than reusing shut-down ones — except a provider rebuilt by a concurrent
+        `_get_tracer()`/`_get_mcp_instruments()` while this awaits, which is kept running rather than
+        orphaned. At app exit use `close()` instead, which also stops any further rebuilds.
 
         Both provider shutdowns block synchronously for up to `_OTEL_SHUTDOWN_TIMEOUT_MILLIS` against
         the OTLP endpoint, so they run via `asyncio.to_thread()` — otherwise a slow/unreachable
         endpoint would stall the event loop (and every other in-flight request) for up to that long.
         """
-        if self._provider is not None:
-            await asyncio.to_thread(self._shutdown_span_provider, self._provider)
-            self._provider = None
-        self.tracer = None
-        self._tracer_endpoint = None
+        async with self._lock:
+            span_provider = self._provider
+            if span_provider is not None:
+                await asyncio.to_thread(self._shutdown_span_provider, span_provider)
+            # A concurrent `_get_tracer()` may have installed a fresh provider during the await;
+            # leave it (and its tracer/endpoint) alone rather than orphaning its export thread.
+            if self._provider is span_provider:
+                self._provider = None
+                self.tracer = None
+                self._tracer_endpoint = None
 
-        if self._meter_provider is not None:
-            await asyncio.to_thread(self._shutdown_meter_provider, self._meter_provider)
-            self._meter_provider = None
-        self._mcp_instruments = None
-        self._meter_endpoint = None
+            meter_provider = self._meter_provider
+            if meter_provider is not None:
+                await asyncio.to_thread(self._shutdown_meter_provider, meter_provider)
+            if self._meter_provider is meter_provider:
+                self._meter_provider = None
+                self._mcp_instruments = None
+                self._meter_endpoint = None
+
+    async def close(self) -> None:
+        """Run `shutdown()` for good at app exit; tracing and metrics stay off afterwards.
+
+        Background tasks (MCP health checks, OAuth refresh) can still call `span()`/`mcp_instruments()`
+        while the app exits. Setting the flag first stops them from building a fresh provider whose
+        export thread nothing would stop — only the OTel SDK's `atexit` hook, which can block interpreter
+        exit for up to 30s against an unreachable endpoint.
+        """
+        self._closed = True
+        await self.shutdown()
 
     def mcp_instruments(self) -> McpInstruments | None:
         """Return the MCP metric instruments, or `None` when disabled or on a build failure.
 
         Telemetry stays best-effort: a failure building the instruments never breaks callers.
         """
-        if self.config is None or not self.config.otel_tracing_enabled:
+        if self._closed or self.config is None or not self.config.otel_tracing_enabled:
             return None
         try:
             return self._get_mcp_instruments()
@@ -353,7 +415,7 @@ class InfraTracer:
         Uses `start_as_current_span` (not `start_span`) so the span is attached to the current OTel
         context — otherwise it would never nest under a caller's own `span()`/`trace_request()` span.
         """
-        if self.config is None or not self.config.otel_tracing_enabled:
+        if self._closed or self.config is None or not self.config.otel_tracing_enabled:
             yield None
             return
         try:
@@ -440,7 +502,7 @@ class InfraTracer:
         def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
             @functools.wraps(func)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
-                if not self._get_config().otel_tracing_enabled:
+                if self._closed or not self._get_config().otel_tracing_enabled:
                     return await func(*args, **kwargs)
                 span_name = "test"
                 span = self._get_tracer().start_span(span_name)

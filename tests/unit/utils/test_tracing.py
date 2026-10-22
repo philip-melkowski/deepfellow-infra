@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: 2026 Simplito sp. z o.o.
 
+import asyncio
 import inspect
 import logging
 import threading
@@ -306,7 +307,10 @@ async def test_reconfigure_otlp_logging_sets_up_when_enabled() -> None:
     async def _noop_teardown() -> None:
         return None
 
-    with patch.object(manager, "teardown", side_effect=_noop_teardown) as mock_teardown, patch.object(manager, "setup") as mock_setup:
+    with (
+        patch.object(manager, "_teardown_locked", side_effect=_noop_teardown) as mock_teardown,
+        patch.object(manager, "setup") as mock_setup,
+    ):
         await manager.reconfigure(cfg)
 
     assert mock_teardown.call_count == 1
@@ -322,7 +326,10 @@ async def test_reconfigure_otlp_logging_skips_setup_when_disabled() -> None:
     async def _noop_teardown() -> None:
         return None
 
-    with patch.object(manager, "teardown", side_effect=_noop_teardown) as mock_teardown, patch.object(manager, "setup") as mock_setup:
+    with (
+        patch.object(manager, "_teardown_locked", side_effect=_noop_teardown) as mock_teardown,
+        patch.object(manager, "setup") as mock_setup,
+    ):
         await manager.reconfigure(cfg)
 
     assert mock_teardown.call_count == 1
@@ -1152,3 +1159,257 @@ async def test_shutdown_noop_when_nothing_built() -> None:
     t = InfraTracer("svc")
 
     await t.shutdown()  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_teardown_otlp_logging_keeps_provider_installed_during_shutdown() -> None:
+    """DFINFRA-321: a provider installed while teardown() awaits must not be dropped by its reset."""
+    manager = OtlpLoggingManager()
+    old_provider = MagicMock()
+    new_provider = MagicMock()
+    manager._provider = old_provider  # pyright: ignore[reportPrivateUsage]
+
+    def _shutdown_and_swap(_provider: Any) -> None:
+        manager._provider = new_provider  # pyright: ignore[reportPrivateUsage]
+
+    with patch.object(manager, "_shutdown_provider", side_effect=_shutdown_and_swap):
+        await manager.teardown()
+
+    assert manager._provider is new_provider  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_teardown_otlp_logging_keeps_configured_state_set_during_shutdown() -> None:
+    """DFINFRA-321: a setup() that lands during teardown()'s await keeps its configured_enabled=True."""
+    manager = OtlpLoggingManager()
+    manager._provider = MagicMock()  # pyright: ignore[reportPrivateUsage]
+    manager.configured_enabled = True
+
+    def _shutdown_and_setup(_provider: Any) -> None:
+        manager._provider = MagicMock()  # pyright: ignore[reportPrivateUsage]
+        manager.configured_enabled = True
+
+    with patch.object(manager, "_shutdown_provider", side_effect=_shutdown_and_setup):
+        await manager.teardown()
+
+    assert manager.configured_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_otlp_logging_teardown_calls_are_serialized() -> None:
+    """DFINFRA-321: a second teardown() waits for the first instead of interleaving with it."""
+    manager = OtlpLoggingManager()
+    manager._provider = MagicMock()  # pyright: ignore[reportPrivateUsage]
+    release = threading.Event()
+    started = threading.Event()
+    active = 0
+    max_active = 0
+
+    def _blocking_shutdown(_provider: Any) -> None:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        started.set()
+        release.wait(timeout=2)
+        active -= 1
+
+    with patch.object(manager, "_shutdown_provider", side_effect=_blocking_shutdown) as mock_shutdown:
+        first = asyncio.create_task(manager.teardown())
+        await asyncio.to_thread(started.wait, 2)
+        manager._provider = MagicMock()  # pyright: ignore[reportPrivateUsage]
+        second = asyncio.create_task(manager.teardown())
+        # Give an unserialized second shutdown time to reach its worker thread.
+        await asyncio.sleep(0.2)
+        assert not second.done()
+        assert mock_shutdown.call_count == 1
+        release.set()
+        await asyncio.gather(first, second)
+
+    assert max_active == 1
+
+
+@pytest.mark.asyncio
+async def test_shutdown_keeps_span_and_meter_providers_installed_during_shutdown() -> None:
+    """DFINFRA-321: providers rebuilt while shutdown() awaits survive it, with their tracer/instruments."""
+    t = InfraTracer(service_name="svc")
+    t._provider = MagicMock()  # pyright: ignore[reportPrivateUsage]
+    t._meter_provider = MagicMock()  # pyright: ignore[reportPrivateUsage]
+    new_provider = MagicMock()
+    new_meter_provider = MagicMock()
+    new_tracer = MagicMock()
+    new_instruments = MagicMock()
+
+    def _swap_span(_provider: Any) -> None:
+        t._provider = new_provider  # pyright: ignore[reportPrivateUsage]
+        t.tracer = new_tracer
+        t._tracer_endpoint = "new:4317"  # pyright: ignore[reportPrivateUsage]
+
+    def _swap_meter(_provider: Any) -> None:
+        t._meter_provider = new_meter_provider  # pyright: ignore[reportPrivateUsage]
+        t._mcp_instruments = new_instruments  # pyright: ignore[reportPrivateUsage]
+        t._meter_endpoint = "new:4317"  # pyright: ignore[reportPrivateUsage]
+
+    with (
+        patch.object(t, "_shutdown_span_provider", side_effect=_swap_span),
+        patch.object(t, "_shutdown_meter_provider", side_effect=_swap_meter),
+    ):
+        await t.shutdown()
+
+    assert t._provider is new_provider  # pyright: ignore[reportPrivateUsage]
+    assert t.tracer is new_tracer
+    assert t._tracer_endpoint == "new:4317"  # pyright: ignore[reportPrivateUsage]
+    assert t._meter_provider is new_meter_provider  # pyright: ignore[reportPrivateUsage]
+    assert t._mcp_instruments is new_instruments  # pyright: ignore[reportPrivateUsage]
+    assert t._meter_endpoint == "new:4317"  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_otlp_logging_reconfigure_waits_for_in_flight_teardown() -> None:
+    """DFINFRA-321: reconfigure() waits for an in-flight teardown() instead of re-shutting its provider."""
+    cfg = _make_config()
+    cfg.otel_logging_enabled = True
+    manager = OtlpLoggingManager()
+    manager._provider = MagicMock()  # pyright: ignore[reportPrivateUsage]
+    release = threading.Event()
+    started = threading.Event()
+
+    def _blocking_shutdown(_provider: Any) -> None:
+        started.set()
+        release.wait(timeout=2)
+
+    with (
+        patch.object(manager, "_shutdown_provider", side_effect=_blocking_shutdown) as mock_shutdown,
+        patch.object(manager, "setup") as mock_setup,
+    ):
+        teardown = asyncio.create_task(manager.teardown())
+        await asyncio.to_thread(started.wait, 2)
+        reconfigure = asyncio.create_task(manager.reconfigure(cfg))
+        # Give an unserialized reconfigure() time to reach its own provider shutdown.
+        await asyncio.sleep(0.2)
+        assert not reconfigure.done()
+        assert mock_shutdown.call_count == 1
+        assert mock_setup.call_count == 0
+        release.set()
+        await asyncio.gather(teardown, reconfigure)
+
+    assert mock_shutdown.call_count == 1
+    assert mock_setup.call_args_list == [call(cfg)]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_calls_are_serialized() -> None:
+    """DFINFRA-321: a second InfraTracer.shutdown() waits for the first instead of re-shutting its provider."""
+    t = InfraTracer(service_name="svc")
+    t._provider = MagicMock()  # pyright: ignore[reportPrivateUsage]
+    release = threading.Event()
+    started = threading.Event()
+
+    def _blocking_shutdown(_provider: Any) -> None:
+        started.set()
+        release.wait(timeout=2)
+
+    with patch.object(t, "_shutdown_span_provider", side_effect=_blocking_shutdown) as mock_shutdown:
+        first = asyncio.create_task(t.shutdown())
+        await asyncio.to_thread(started.wait, 2)
+        second = asyncio.create_task(t.shutdown())
+        # Give an unserialized second shutdown time to reach its own provider shutdown.
+        await asyncio.sleep(0.2)
+        assert not second.done()
+        assert mock_shutdown.call_count == 1
+        release.set()
+        await asyncio.gather(first, second)
+
+    assert mock_shutdown.call_count == 1
+    assert t._provider is None  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_close_stops_providers_and_disables_further_tracing() -> None:
+    """DFINFRA-321: after close(), span()/mcp_instruments() don't rebuild providers that nothing would shut down."""
+    t = _make_tracer_with_config(enabled=True)
+    span_provider = MagicMock()
+    meter_provider = MagicMock()
+    t._provider = span_provider  # pyright: ignore[reportPrivateUsage]
+    t._meter_provider = meter_provider  # pyright: ignore[reportPrivateUsage]
+
+    await t.close()
+
+    span_provider.shutdown.assert_called_once()
+    meter_provider.shutdown.assert_called_once()
+    with patch.object(t, "_get_tracer") as mock_get_tracer, patch.object(t, "_get_mcp_instruments") as mock_get_instruments:
+        with t.span("mcp.op") as span:
+            assert span is None
+        assert t.mcp_instruments() is None
+    mock_get_tracer.assert_not_called()
+    mock_get_instruments.assert_not_called()
+    assert t._provider is None  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_close_blocks_rebuild_started_during_shutdown() -> None:
+    """DFINFRA-321: a span() during the final shutdown's await can't install a fresh provider."""
+    t = _make_tracer_with_config(enabled=True)
+    t._provider = MagicMock()  # pyright: ignore[reportPrivateUsage]
+    release = threading.Event()
+    started = threading.Event()
+
+    def _blocking_shutdown(_provider: Any) -> None:
+        started.set()
+        release.wait(timeout=2)
+
+    with (
+        patch.object(t, "_shutdown_span_provider", side_effect=_blocking_shutdown),
+        patch.object(t, "_get_tracer") as mock_get_tracer,
+    ):
+        closing = asyncio.create_task(t.close())
+        await asyncio.to_thread(started.wait, 2)
+        with t.span("mcp.op") as span:
+            assert span is None
+        release.set()
+        await closing
+
+    mock_get_tracer.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_otlp_logging_close_tears_down_and_blocks_setup_and_reconfigure() -> None:
+    """DFINFRA-321: nothing is set up after close(), so no provider outlives the final teardown."""
+    cfg = _make_config()
+    cfg.otel_logging_enabled = True
+    manager = OtlpLoggingManager()
+    provider = MagicMock()
+    manager._provider = provider  # pyright: ignore[reportPrivateUsage]
+
+    with patch.object(manager, "_shutdown_provider") as mock_shutdown:
+        await manager.close()
+    manager.setup(cfg)
+    await manager.reconfigure(cfg)
+
+    mock_shutdown.assert_called_once_with(provider)
+    assert manager._provider is None  # pyright: ignore[reportPrivateUsage]
+    assert manager.configured_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_otlp_logging_reconfigure_queued_behind_close_does_not_set_up() -> None:
+    """DFINFRA-321: a reconfigure() waiting on the lock while close() runs doesn't rebuild afterwards."""
+    cfg = _make_config()
+    cfg.otel_logging_enabled = True
+    manager = OtlpLoggingManager()
+    manager._provider = MagicMock()  # pyright: ignore[reportPrivateUsage]
+    release = threading.Event()
+    started = threading.Event()
+
+    def _blocking_shutdown(_provider: Any) -> None:
+        started.set()
+        release.wait(timeout=2)
+
+    with patch.object(manager, "_shutdown_provider", side_effect=_blocking_shutdown), patch.object(manager, "setup") as mock_setup:
+        closing = asyncio.create_task(manager.close())
+        await asyncio.to_thread(started.wait, 2)
+        reconfigure = asyncio.create_task(manager.reconfigure(cfg))
+        await asyncio.sleep(0.2)
+        release.set()
+        await asyncio.gather(closing, reconfigure)
+
+    mock_setup.assert_not_called()

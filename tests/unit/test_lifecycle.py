@@ -141,7 +141,7 @@ def _apply_base_patches(active_patches: dict[str, Mock], *, config: MagicMock | 
     svc_mgr.resolve_platform_compatibility = AsyncMock()
 
     otlp_logging = active_patches["server.lifecycle.OtlpLoggingManager"].return_value
-    otlp_logging.teardown = AsyncMock()
+    otlp_logging.close = AsyncMock()
 
     sentry = active_patches["server.lifecycle.sentry"]
     sentry.reconfigure = AsyncMock()
@@ -197,11 +197,11 @@ async def test_lifespan_shuts_down_tracer_on_exit(app: FastAPI, base_mocks: dict
     _apply_base_patches(base_mocks, config=cfg)
 
     with patch("server.lifecycle.tracer") as mock_tracer:
-        mock_tracer.shutdown = AsyncMock()
+        mock_tracer.close = AsyncMock()
         async with lifespan(app):
             pass
 
-        assert mock_tracer.shutdown.call_count == 1
+        assert mock_tracer.close.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -213,7 +213,7 @@ async def test_lifespan_tears_down_otlp_logging_on_exit(app: FastAPI, base_mocks
         pass
 
     otlp_logging = base_mocks["server.lifecycle.OtlpLoggingManager"].return_value
-    assert otlp_logging.teardown.call_count == 1
+    assert otlp_logging.close.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -221,16 +221,16 @@ async def test_lifespan_shutdown_continues_after_a_step_fails(app: FastAPI, base
     cfg = _make_config()
     _apply_base_patches(base_mocks, config=cfg)
     otlp_logging = base_mocks["server.lifecycle.OtlpLoggingManager"].return_value
-    otlp_logging.teardown = AsyncMock(side_effect=RuntimeError("boom"))
+    otlp_logging.close = AsyncMock(side_effect=RuntimeError("boom"))
     sentry = base_mocks["server.lifecycle.sentry"]
 
     with patch("server.lifecycle.tracer") as mock_tracer:
-        mock_tracer.shutdown = AsyncMock()
+        mock_tracer.close = AsyncMock()
         async with lifespan(app):
             pass
 
-        assert mock_tracer.shutdown.call_count == 1
-    assert otlp_logging.teardown.call_count == 1
+        assert mock_tracer.close.call_count == 1
+    assert otlp_logging.close.call_count == 1
     assert sentry.shutdown.call_count == 1
     log_exception = base_mocks["logger.exception"]
     assert log_exception.call_args_list == [call("Shutdown step '%s' failed, continuing", "OTLP logging")]
