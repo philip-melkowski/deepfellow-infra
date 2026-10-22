@@ -1,15 +1,18 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: 2026 Simplito sp. z o.o.
 
+import asyncio
 import json
+from collections.abc import AsyncIterator
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from server.endpointregistry import ChatCompletionEndpoint, McpEndpoint, RegisteredModel, RegistryEntry, SimpleEndpoint
+from server.endpointregistry import ChatCompletionEndpoint, CustomEndpoint, McpEndpoint, RegisteredModel, RegistryEntry, SimpleEndpoint
 from server.model_tester import ModelTester, ModelTestError, Response, UnpackedResponse
 
 
@@ -586,15 +589,175 @@ async def test_perform_test_dispatches_rerank() -> None:
     assert result["result"] == "ok"
 
 
+def _make_custom_entry(*responses: StreamingResponse) -> tuple[RegistryEntry, AsyncMock]:
+    on_request = AsyncMock(side_effect=responses)
+    entry = _make_registered_model("custom")
+    entry.registered_model.name = "deepfellow-bge-m3"
+    entry.registered_model.endpoint = CustomEndpoint(on_request=on_request)
+    return entry, on_request
+
+
+def _custom_response(status_code: int, content: bytes = b"") -> StreamingResponse:
+    return _make_streaming_response(content, media_type="text/plain", status_code=status_code)
+
+
 @pytest.mark.asyncio
-async def test_perform_test_raises_test_error_for_custom() -> None:
+async def test_perform_test_custom_sends_get_to_health_then_test_model() -> None:
+    tester = ModelTester()
+    entry, on_request = _make_custom_entry(_custom_response(200, b"up"), _custom_response(200, b"passed"))
+
+    result = await tester._perform_test(entry)  # pyright: ignore[reportPrivateUsage]
+
+    requests = [c.args[0] for c in on_request.call_args_list]
+    assert [r.method for r in requests] == ["GET", "GET"]
+    assert [r.path_params["full_path"] for r in requests] == ["deepfellow-bge-m3/health", "deepfellow-bge-m3/test_model"]
+    assert result == {"result": "ok", "output": "passed", "details": {"health": "up", "test_model": "passed"}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("media_type", "body", "expected_health"),
+    [
+        ("application/json", b'{"status":"ok"}', {"status": "ok"}),
+        ("text/plain", b'{"status":"ok"}', '{"status":"ok"}'),
+        ("application/json", b"not json", "not json"),
+        ("application/json", b'{"a":1,"a":2}', '{"a":1,"a":2}'),
+        ("application/json", b'{"a":NaN}', '{"a":NaN}'),
+    ],
+)
+async def test_perform_test_custom_details_parse_json_only_when_lossless(media_type: str, body: bytes, expected_health: Any) -> None:
+    tester = ModelTester()
+    entry, _ = _make_custom_entry(_make_streaming_response(body, media_type=media_type), _custom_response(404))
+
+    result = await tester._perform_test(entry)  # pyright: ignore[reportPrivateUsage]
+
+    assert result == {"result": "ok", "output": body.decode(), "details": {"health": expected_health, "test_model": None}}
+
+
+@pytest.mark.asyncio
+async def test_perform_test_custom_empty_test_model_body_does_not_show_health_body() -> None:
+    tester = ModelTester()
+    entry, _ = _make_custom_entry(_custom_response(200, b"up"), _custom_response(200))
+
+    result = await tester._perform_test(entry)  # pyright: ignore[reportPrivateUsage]
+
+    assert result == {"result": "ok", "output": "passed", "details": {"health": "up", "test_model": ""}}
+
+
+@pytest.mark.asyncio
+async def test_perform_test_custom_reports_unreachable_model() -> None:
     tester = ModelTester()
     entry = _make_registered_model("custom")
+    entry.registered_model.endpoint = CustomEndpoint(on_request=AsyncMock(side_effect=aiohttp.ClientConnectionError("Connection refused")))
 
     with pytest.raises(ModelTestError) as exc_info:
         await tester._perform_test(entry)  # pyright: ignore[reportPrivateUsage]
 
-    assert "Custom" in exc_info.value.error
+    assert exc_info.value.error == "Model unreachable: Connection refused"
+
+
+@pytest.mark.asyncio
+async def test_perform_test_custom_falls_back_to_healthz() -> None:
+    tester = ModelTester()
+    entry, on_request = _make_custom_entry(_custom_response(404), _custom_response(200), _custom_response(404))
+
+    result = await tester._perform_test(entry)  # pyright: ignore[reportPrivateUsage]
+
+    assert on_request.call_args_list[1].args[0].path_params["full_path"] == "deepfellow-bge-m3/healthz"
+    assert result == {"result": "ok", "output": "healthy", "details": {"health": "", "test_model": None}}
+
+
+@pytest.mark.asyncio
+async def test_perform_test_custom_passes_with_test_model_only() -> None:
+    tester = ModelTester()
+    entry, _ = _make_custom_entry(_custom_response(404), _custom_response(404), _custom_response(200, b"passed"))
+
+    result = await tester._perform_test(entry)  # pyright: ignore[reportPrivateUsage]
+
+    assert result == {"result": "ok", "output": "passed", "details": {"health": None, "test_model": "passed"}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("responses", "error"),
+    [
+        ([503], "Health check failed"),
+        ([404, 500], "Health check failed"),
+        ([200, 500], "Model test failed"),
+        ([404, 404, 500], "Model test failed"),
+        ([404, 404, 404], "No health or test endpoint found (tried: /health, /healthz, /test_model)"),
+    ],
+)
+async def test_perform_test_custom_raises_test_error(responses: list[int], error: str) -> None:
+    tester = ModelTester()
+    entry, on_request = _make_custom_entry(*(_custom_response(status) for status in responses))
+
+    with pytest.raises(ModelTestError) as exc_info:
+        await tester._perform_test(entry)  # pyright: ignore[reportPrivateUsage]
+
+    assert exc_info.value.error == error
+    assert on_request.call_count == len(responses)
+
+
+@pytest.mark.asyncio
+async def test_perform_test_custom_rejects_oversized_body_and_closes_stream() -> None:
+    tester = ModelTester()
+    closed: list[bool] = []
+
+    async def endless() -> AsyncIterator[bytes]:
+        try:
+            while True:
+                yield b"x" * 1024
+        finally:
+            closed.append(True)
+
+    entry, _ = _make_custom_entry(StreamingResponse(endless(), media_type="text/plain"))
+
+    with pytest.raises(ModelTestError) as exc_info:
+        await tester._perform_test(entry)  # pyright: ignore[reportPrivateUsage]
+
+    assert exc_info.value.error == "Response too large (limit 64 KB)"
+    assert closed == [True]
+
+
+class _EndlessBody:
+    """Async iterable without `aclose`, unlike a generator."""
+
+    def __aiter__(self) -> "_EndlessBody":
+        return self
+
+    async def __anext__(self) -> bytes:
+        return b"x" * 1024
+
+
+@pytest.mark.asyncio
+async def test_perform_test_custom_rejects_oversized_body_without_aclose() -> None:
+    tester = ModelTester()
+    entry, _ = _make_custom_entry(StreamingResponse(_EndlessBody(), media_type="text/plain"))
+
+    with pytest.raises(ModelTestError) as exc_info:
+        await tester._perform_test(entry)  # pyright: ignore[reportPrivateUsage]
+
+    assert exc_info.value.error == "Response too large (limit 64 KB)"
+
+
+@pytest.mark.asyncio
+@patch("server.model_tester.CUSTOM_TEST_TIMEOUT_SECONDS", 0.01)
+async def test_perform_test_custom_times_out() -> None:
+    tester = ModelTester()
+
+    async def hang(_: Any) -> StreamingResponse:
+        await asyncio.sleep(1)
+        raise AssertionError("unreachable")
+
+    entry = _make_registered_model("custom")
+    entry.registered_model.name = "deepfellow-bge-m3"
+    entry.registered_model.endpoint = CustomEndpoint(on_request=hang)
+
+    with pytest.raises(ModelTestError) as exc_info:
+        await tester._perform_test(entry)  # pyright: ignore[reportPrivateUsage]
+
+    assert exc_info.value.error == "Model test timed out (limit 0.01 s)"
 
 
 @pytest.mark.asyncio
@@ -618,11 +781,11 @@ async def test_perform_test_raises_runtime_error_for_llm_type_without_testable_e
 @pytest.mark.asyncio
 async def test_test_model_returns_error_on_test_error() -> None:
     tester = ModelTester()
-    entry = _make_registered_model("custom")
+    tester._perform_test = AsyncMock(side_effect=ModelTestError("boom"))  # pyright: ignore[reportPrivateUsage]
 
-    result = await tester.test_model(entry)
+    result = await tester.test_model(_make_registered_model("custom"))
 
-    assert "error" in result
+    assert result == {"error": "boom"}
 
 
 @pytest.mark.asyncio
@@ -637,6 +800,21 @@ async def test_test_model_returns_error_with_details_when_response_present() -> 
 
     assert "error" in result
     assert "details" in result
+
+
+@pytest.mark.asyncio
+async def test_test_model_unhealthy_custom_with_nan_body_stays_serializable() -> None:
+    tester = ModelTester()
+    body = b'{"status":"down","score":NaN}'
+    entry, _ = _make_custom_entry(_make_streaming_response(body, media_type="application/json", status_code=503))
+
+    result = await tester.test_model(entry)
+
+    assert result == {
+        "error": "Health check failed",
+        "details": {"status_code": 503, "content_type": "application/json", "data": body.decode()},
+    }
+    JSONResponse(result)
 
 
 @pytest.mark.asyncio
