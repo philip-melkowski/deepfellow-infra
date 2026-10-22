@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Default Ollama image is now `0.40.8`; unpinned instances switch on next start and keep their models.
+
 ### Fixed
 
 - `$` in a service's command, entrypoint and healthcheck now reaches the container as typed.
