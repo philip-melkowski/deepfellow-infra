@@ -2504,5 +2504,207 @@
             "name": "Xenova/bge-base-en-v1.5",
             "size": "1GB"
         }
+    ],
+    "stts": [
+        {
+            "name": "AbelZimba/whisper-bemba-stt",
+            "size": "927MB"
+        },
+        {
+            "name": "atlasia/moulsot.v0.3",
+            "size": "3GB"
+        },
+        {
+            "name": "distil-whisper/distil-large-v3",
+            "size": "11GB"
+        },
+        {
+            "name": "ibm-granite/granite-4.0-1b-speech",
+            "size": "4GB"
+        },
+        {
+            "name": "ibm-granite/granite-speech-3.2-8b",
+            "size": "15GB"
+        },
+        {
+            "name": "ibm-granite/granite-speech-3.3-2b",
+            "size": "11GB"
+        },
+        {
+            "name": "ibm-granite/granite-speech-3.3-8b",
+            "size": "16GB"
+        },
+        {
+            "name": "ibm-granite/granite-speech-4.1-2b",
+            "size": "4GB"
+        },
+        {
+            "name": "ibm-granite/granite-speech-5.0-2b",
+            "size": "4GB"
+        },
+        {
+            "name": "JacobLinCool/TEA-ASR-1.1",
+            "size": "3GB"
+        },
+        {
+            "name": "JacobLinCool/TEA-ASR-1.1-mini",
+            "size": "1GB"
+        },
+        {
+            "name": "jaykwok/Qwen3-ASR-1.7B-JA-Anime-Galgame",
+            "size": "11GB"
+        },
+        {
+            "name": "jaykwok/Qwen3-ASR-1.7B-JA-Anime-Galgame-hf",
+            "size": "3GB"
+        },
+        {
+            "name": "KBLab/kb-whisper-large",
+            "size": "46GB"
+        },
+        {
+            "name": "knoveleng/polyglot-lion-1.7b",
+            "size": "3GB"
+        },
+        {
+            "name": "litagin/anime-whisper",
+            "size": "2GB"
+        },
+        {
+            "name": "MediaTek-Research/Breeze-ASR-25",
+            "size": "14GB"
+        },
+        {
+            "name": "MediaTek-Research/Breeze-ASR-26",
+            "size": "5GB"
+        },
+        {
+            "name": "mistralai/Voxtral-Mini-4B-Realtime-2602",
+            "size": "16GB"
+        },
+        {
+            "name": "mistralai/Voxtral-Mini-4B-Realtime-Arabic",
+            "size": "16GB"
+        },
+        {
+            "name": "mohammedaly22/QwenCleo-ASR",
+            "size": "3GB"
+        },
+        {
+            "name": "NbAiLab/nb-asr-qwen3-lunde07-mixed-nob-100k-longfix",
+            "size": "1GB"
+        },
+        {
+            "name": "neosophie/Qwen3-ASR-1.7B-JA",
+            "size": "3GB"
+        },
+        {
+            "name": "netease-youdao/Confucius4-R2T2",
+            "size": "3GB"
+        },
+        {
+            "name": "openai/whisper-base",
+            "size": "1GB"
+        },
+        {
+            "name": "openai/whisper-base.en",
+            "size": "1GB"
+        },
+        {
+            "name": "openai/whisper-large-v2",
+            "size": "23GB"
+        },
+        {
+            "name": "openai/whisper-large-v3",
+            "size": "23GB"
+        },
+        {
+            "name": "openai/whisper-large-v3-turbo",
+            "size": "1GB"
+        },
+        {
+            "name": "openai/whisper-medium",
+            "size": "11GB"
+        },
+        {
+            "name": "openai/whisper-medium.en",
+            "size": "11GB"
+        },
+        {
+            "name": "openai/whisper-small",
+            "size": "3GB"
+        },
+        {
+            "name": "openai/whisper-small.en",
+            "size": "3GB"
+        },
+        {
+            "name": "openai/whisper-tiny",
+            "size": "580MB"
+        },
+        {
+            "name": "openai/whisper-tiny.en",
+            "size": "580MB"
+        },
+        {
+            "name": "primeline/whisper-large-v3-turbo-german",
+            "size": "1GB"
+        },
+        {
+            "name": "Qwen/Qwen3-ASR-0.6B",
+            "size": "1GB"
+        },
+        {
+            "name": "Qwen/Qwen3-ASR-0.6B-hf",
+            "size": "1GB"
+        },
+        {
+            "name": "Qwen/Qwen3-ASR-1.7B",
+            "size": "4GB"
+        },
+        {
+            "name": "Qwen/Qwen3-ASR-1.7B-hf",
+            "size": "3GB"
+        },
+        {
+            "name": "RedHatAI/Voxtral-Mini-3B-2507-FP8-dynamic",
+            "size": "11GB"
+        },
+        {
+            "name": "RedHatAI/whisper-large-v3-FP8-dynamic",
+            "size": "1GB"
+        },
+        {
+            "name": "rookes/cantocaptions-cantonese-asr",
+            "size": "4GB"
+        },
+        {
+            "name": "seanghay/Qwen3-ASR-0.6B-Khmer",
+            "size": "1GB"
+        },
+        {
+            "name": "tarteel-ai/whisper-base-ar-quran",
+            "size": "278MB"
+        },
+        {
+            "name": "typhoon-ai/typhoon-asr-qwen-0.6b-ctx",
+            "size": "1GB"
+        },
+        {
+            "name": "vadimbelsky/qwen3-asr-arabic-uae",
+            "size": "3GB"
+        },
+        {
+            "name": "vasista22/whisper-tamil-large-v2",
+            "size": "11GB"
+        },
+        {
+            "name": "vasista22/whisper-tamil-small",
+            "size": "1GB"
+        },
+        {
+            "name": "vrfai/Qwen3-ASR-1.7B-fp8",
+            "size": "2GB"
+        }
     ]
 }

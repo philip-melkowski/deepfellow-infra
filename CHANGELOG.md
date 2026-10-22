@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- vLLM speech-to-text (`stt`) models such as Whisper, served on `/v1/audio/transcriptions`.
+- vLLM catalog now lists 50 speech-to-text models, and the catalog refresh fetches them from HuggingFace.
+
 ### Changed
 
 - Default Ollama image is now `0.40.8`; unpinned instances switch on next start and keep their models.

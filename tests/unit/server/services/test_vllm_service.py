@@ -32,6 +32,7 @@ from server.services.vllm_service import (
     VllmOptions,
     VllmService,
     _const,  # pyright: ignore[reportPrivateUsage]
+    _read_models,  # pyright: ignore[reportPrivateUsage]
     _round_up_lora_rank,  # pyright: ignore[reportPrivateUsage]
 )
 from server.utils.core import (
@@ -219,6 +220,15 @@ def test_get_model_type_spec_reranker_default_extra_args(svc: VllmService) -> No
     extra_args_field = next(f for f in spec.fields if f.name == "extra_args")
     assert extra_args_field.default is not None
     assert "--trust-remote-code" in (extra_args_field.default or "")
+
+
+def test_get_model_spec_stt_has_no_max_model_length(svc: VllmService) -> None:
+    stt_names = [f.name for f in svc.get_model_type_spec("default", "stt").fields]
+    llm_names = [f.name for f in svc.get_model_type_spec("default", "llm").fields]
+
+    assert "max_model_length" not in stt_names
+    assert "max_model_length" in llm_names
+    assert {"rename", "alias", "extra_args", "extra_envs"} <= set(stt_names)
 
 
 def test_get_model_install_fields_returns_spec_fields_of_model_type(svc: VllmService) -> None:
@@ -1155,6 +1165,30 @@ def test_register_model_endpoint_embedding_calls_embeddings_proxy(svc: VllmServi
     assert deps["endpoint_registry"].register_rerank_as_proxy.call_count == 0
 
 
+def test_register_model_endpoint_stt_calls_audio_transcriptions_proxy(svc: VllmService, deps: dict[str, Any]) -> None:
+    model = VllmModel(hf_id="openai/whisper-small", size="1GB", model_type="stt")
+    model_info = _make_model_installed_info("openai/whisper-small", model_type="stt")
+
+    svc._register_model_endpoint(  # pyright: ignore[reportPrivateUsage]
+        model_info=model_info,
+        model=model,
+        registered_name="openai/whisper-small",
+        model_id="openai/whisper-small",
+        context_window=None,
+        max_context_window=None,
+        capacity=None,
+    )
+
+    registry = deps["endpoint_registry"]
+    assert registry.register_audio_transcriptions_as_proxy.call_count == 1
+    kwargs = registry.register_audio_transcriptions_as_proxy.call_args.kwargs
+    assert kwargs["props"].type == "stt"
+    assert kwargs["props"].endpoints == ["/v1/audio/transcriptions"]
+    assert kwargs["options"].url.endswith("/v1/audio/transcriptions")
+    assert kwargs["options"].rewrite_model_to == "openai/whisper-small"
+    assert registry.register_chat_completion_as_proxy.call_count == 0
+
+
 def test_register_model_endpoint_passes_capacity_through(svc: VllmService, deps: dict[str, Any]) -> None:
     model = VllmModel(hf_id="google/test", size="1GB", model_type="llm")
     model_info = _make_model_installed_info("google/test", model_type="llm")
@@ -1715,6 +1749,25 @@ async def test_install_model_registers_reranker_endpoint_for_reranker_model(svc:
 
     assert deps["endpoint_registry"].register_rerank_as_proxy.call_count == 1
     assert deps["endpoint_registry"].register_chat_completion_as_proxy.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_install_model_registers_transcriptions_for_stt_model(svc: VllmService, deps: dict[str, Any], tmp_path: Path) -> None:
+    _setup_install_mocks(svc, deps)
+    stt_id = "whisper-model"
+    svc.models["default"][stt_id] = VllmModel(hf_id=stt_id, size="1GB", model_type="stt")
+
+    with (
+        patch.object(svc, "_download_model_or_set_progress", new_callable=AsyncMock, return_value=tmp_path / "model"),  # pyright: ignore[reportPrivateUsage]
+        patch("server.services.vllm_service.get_base_url", return_value="http://localhost:8000"),
+        patch.object(svc, "get_specified_hardware_parts", return_value=[]),
+    ):
+        promise = await svc._install_model("default", stt_id, InstallModelIn(spec={}))  # pyright: ignore[reportPrivateUsage]
+        await promise.wait()
+
+    assert deps["endpoint_registry"].register_audio_transcriptions_as_proxy.call_count == 1
+    assert deps["endpoint_registry"].register_chat_completion_as_proxy.call_count == 0
+    assert svc.get_instance_installed_info("default").models[stt_id].model_type == "stt"
 
 
 @pytest.mark.asyncio
@@ -2282,6 +2335,20 @@ async def test_uninstall_model_reranker_calls_unregister_rerank(svc: VllmService
     assert deps["endpoint_registry"].unregister_rerank.call_count == 1
     assert deps["endpoint_registry"].unregister_rerank.call_args == call("reranker-model", "reg-rerank")
     assert deps["endpoint_registry"].unregister_chat_completion.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_uninstall_model_stt_calls_unregister_audio_transcriptions(svc: VllmService, deps: dict[str, Any]) -> None:
+    installed = _make_installed_info()
+    installed.models["whisper-model"] = _make_model_installed_info("whisper-model", "reg-stt", model_type="stt")
+    svc.instances_info["default"].installed = installed
+    deps["docker_service"].uninstall_docker = AsyncMock()
+
+    await svc._uninstall_model("default", "whisper-model", UninstallModelIn(purge=False))  # pyright: ignore[reportPrivateUsage]
+
+    assert deps["endpoint_registry"].unregister_audio_transcriptions.call_args == call("whisper-model", "reg-stt")
+    assert deps["endpoint_registry"].unregister_chat_completion.call_count == 0
+    assert "whisper-model" not in installed.models
 
 
 @pytest.mark.asyncio
@@ -4168,6 +4235,8 @@ async def _fake_fetch_registry_entries(
         return "llms", [{"name": "new/model", "size": "2GB"}]
     if model_type == "reranker":
         return "rerankers", []
+    if model_type == "stt":
+        return "stts", [{"name": "new/whisper", "size": "3GB"}]
     return "embeddings", []
 
 
@@ -4203,11 +4272,13 @@ async def test_refresh_catalog_writes_registry_and_reloads_const(svc: VllmServic
             promise = await svc.refresh_catalog()
             result = await promise.wait()
 
-        assert result.added == 1
+        assert result.added == 2
         assert "new/model" in _const.models
+        assert _const.models["new/whisper"].model_type == "stt"
         assert "old/model" not in _const.models
         written = json.loads((tmp_path / "static" / "vllm-min.json").read_text(encoding="utf-8"))
         assert written["llms"] == [{"name": "new/model", "size": "2GB"}]
+        assert written["stts"] == [{"name": "new/whisper", "size": "3GB"}]
         assert set(svc.models["default"].keys()) == set(_const.models.keys())
     finally:
         _const.models = original_models
@@ -4803,3 +4874,14 @@ async def test_get_gpu_memory_utilization_raises_422_when_default_is_below_minim
 def test_newest_tag_in_the_real_docker_hub_list(svc: VllmService, installed: str, max_cuda: tuple[int, int] | None, expected: str) -> None:
     tags = svc.filter_docker_tags(real_tags("vllm"), "GPU")
     assert newest_docker_tag(tags, installed, max_cuda) == expected
+
+
+def test_read_models_reads_stt_entries_from_catalog(tmp_path: Path) -> None:
+    (tmp_path / "static").mkdir()
+    (tmp_path / "static" / "vllm-min.json").write_text(json.dumps({"stts": [{"name": "openai/whisper-small", "size": "1 GB"}]}))
+
+    with patch("server.services.vllm_service.get_main_dir", return_value=tmp_path):
+        models = _read_models()
+
+    assert models["openai/whisper-small"].model_type == "stt"
+    assert models["openai/whisper-small"].hf_id == "openai/whisper-small"

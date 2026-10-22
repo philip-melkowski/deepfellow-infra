@@ -149,6 +149,39 @@ EMBEDDING_TAGS: dict[str, Callable[[dict[str, Any]], bool]] = {
 }
 
 
+# vLLM's /v1/audio/transcriptions only serves encoder-decoder / audio-LLM speech models it ships a
+# transcription implementation for. HF's "automatic-speech-recognition" tag is far broader (CTC
+# models like wav2vec2/hubert, ctranslate2/onnx re-exports, ...), so STT candidates are kept only
+# when their `config.architectures` is on this best-effort allowlist.
+STT_TAGS = ["automatic-speech-recognition"]
+# HF model-family tags queried on top of STT_TAGS so the candidate limit isn't spent on wav2vec2 & co.
+STT_FAMILY_FILTERS = ["whisper", "voxtral", "voxtral_realtime", "qwen3_asr", "granite_speech"]
+SUPPORTED_STT_ARCHITECTURES = {
+    "WhisperForConditionalGeneration",
+    "VoxtralForConditionalGeneration",
+    "VoxtralRealtimeForConditionalGeneration",
+    "GraniteSpeechForConditionalGeneration",
+    "Qwen3ASRForConditionalGeneration",
+}
+
+
+def is_non_servable_stt_repo(model: dict[str, Any]) -> bool:
+    """Exclude repos that carry a supported architecture in `config.json` but that vLLM can't load.
+
+    ONNX-only exports live in the onnx-community/* and Xenova/* namespaces (the `onnx` tag alone isn't
+    enough: official repos often ship safetensors next to ONNX files), CoreML repos carry no servable
+    weights, and forced aligners reuse the ASR architecture without producing transcriptions.
+    """
+    tags = {str(t).lower() for t in model.get("tags") or []}
+    name = model.get("id", "").lower()
+    return "coreml" in tags or name.startswith(("onnx-community/", "xenova/")) or "forcedaligner" in name
+
+
+def is_supported_stt(architectures: list[str]) -> bool:
+    """Return True if any architecture is one vLLM can serve for audio transcription."""
+    return any(a in SUPPORTED_STT_ARCHITECTURES for a in architectures)
+
+
 def is_supported_cross_encoder(architectures: list[str]) -> bool:
     """Return True if any architecture is a standard HF sequence-classification head.
 
@@ -338,6 +371,21 @@ async def _check_gated_file_access(
         logger.warning("Couldn't verify access to gated %s: %s", hf_id, exc)
 
 
+def _check_architecture(hf_id: str, data: dict[str, Any], model_type: str) -> None:
+    """Raise `ModelIncompatibleError` if the repo's `config.architectures` isn't one vLLM serves for `model_type`."""
+    architectures = data.get("config", {}).get("architectures") or []
+    found = ", ".join(architectures) or "unknown"
+    if model_type == "reranker" and not is_supported_cross_encoder(architectures):
+        msg = (
+            f"{hf_id}'s architecture ({found}) isn't a supported cross-encoder; "
+            "the rerank/score task only serves ForSequenceClassification models."
+        )
+        raise ModelIncompatibleError(msg)
+    if model_type == "stt" and not is_supported_stt(architectures):
+        msg = f"{hf_id}'s architecture ({found}) isn't one vLLM serves for /v1/audio/transcriptions."
+        raise ModelIncompatibleError(msg)
+
+
 async def validate_model_compatibility(
     session: aiohttp.ClientSession,
     hf_id: str,
@@ -350,7 +398,7 @@ async def validate_model_compatibility(
     """Raise `ModelIncompatibleError` with a clear reason if `hf_id` can't be served, given `model_type`.
 
     Reuses the same heuristics the catalog refresh already applies when building the curated model
-    list (`is_gguf`, `has_chat_template`, `is_supported_cross_encoder`), so adding a custom model by
+    list (`is_gguf`, `has_chat_template`, `is_supported_cross_encoder`, `is_supported_stt`), so adding a custom model by
     hf_id fails fast with a clear message instead of only surfacing as an opaque container-start
     error. `max_retries` defaults low (unlike the catalog crawler's default of 8) because this runs
     on an interactive add-model request rather than an offline batch job.
@@ -388,21 +436,16 @@ async def validate_model_compatibility(
         if not template_ok:
             msg = f"{hf_id} doesn't ship a chat template, so it can't be served for chat completions."
             raise ModelIncompatibleError(msg)
-    elif model_type == "reranker":
-        architectures = data.get("config", {}).get("architectures") or []
-        if not is_supported_cross_encoder(architectures):
-            found = ", ".join(architectures) or "unknown"
-            msg = (
-                f"{hf_id}'s architecture ({found}) isn't a supported cross-encoder; "
-                "the rerank/score task only serves ForSequenceClassification models."
-            )
-            raise ModelIncompatibleError(msg)
+    elif model_type in ("reranker", "stt"):
+        _check_architecture(hf_id, data, model_type)
 
     return data
 
 
-async def fetch_popular_models(session: aiohttp.ClientSession, tag: str, sort: str, limit: int) -> list[dict[str, Any]]:
-    """Fetch popular LLMs from HuggingFace API sorted by the given criterion."""
+async def fetch_popular_models(
+    session: aiohttp.ClientSession, tag: str, sort: str, limit: int, extra_filter: str | None = None
+) -> list[dict[str, Any]]:
+    """Fetch popular models with the given pipeline_tag (and optional extra tag filter) sorted by the given criterion."""
     params = {
         "pipeline_tag": tag,
         "sort": sort,
@@ -410,6 +453,8 @@ async def fetch_popular_models(session: aiohttp.ClientSession, tag: str, sort: s
         "limit": str(limit),
         "cardData": "true",
     }
+    if extra_filter:
+        params["filter"] = extra_filter
     return await get_json_with_retry(session, f"{HF_API}/models", params)
 
 
@@ -449,6 +494,41 @@ async def collect_llm_models(session: aiohttp.ClientSession, active: dict[str, i
             if mid not in seen and is_llm(m) and not is_gguf(m) and not is_test_fixture(m) and not is_mlx(m):
                 seen.add(mid)
                 models.append(m)
+    return models
+
+
+async def collect_stt_models(
+    session: aiohttp.ClientSession, active: dict[str, int], log: Callable[[str], None] = lambda _msg: None
+) -> list[dict[str, Any]]:
+    """Fetch speech-to-text models: per sort key, the global top N across all vLLM-servable families.
+
+    Querying only the broad `automatic-speech-recognition` tag fills the top N with wav2vec2/CTC
+    models (and repos without a `config.json`) vLLM can't serve, so each family in `STT_FAMILY_FILTERS`
+    is queried on its own and the merged results are ranked by the sort key before cutting to N.
+    """
+    fetch_tasks = [
+        fetch_popular_models(session, tag, sort, limit, family)
+        for sort, limit in active.items()
+        for tag in STT_TAGS
+        for family in STT_FAMILY_FILTERS
+    ]
+    results = iter(await asyncio.gather(*fetch_tasks))
+    seen: set[str] = set()
+    prefiltered: set[str] = set()
+    models: list[dict[str, Any]] = []
+    for sort, limit in active.items():
+        batches = [next(results) for _ in STT_TAGS for _ in STT_FAMILY_FILTERS]
+        fetched = {m["id"]: m for batch in batches for m in batch}.values()
+        candidates = [m for m in fetched if not is_gguf(m) and not is_test_fixture(m) and not is_mlx(m) and not is_non_servable_stt_repo(m)]
+        kept = {m["id"] for m in candidates}
+        prefiltered.update(m["id"] for m in fetched if m["id"] not in kept)
+        candidates.sort(key=lambda m: m.get(sort) or 0, reverse=True)
+        for m in candidates[:limit]:
+            if m["id"] not in seen:
+                seen.add(m["id"])
+                models.append(m)
+    if prefiltered:
+        log(f"Dropped {len(prefiltered)} STT candidate(s) as gguf/mlx/ONNX/CoreML/aligner/test repos before ranking.")
     return models
 
 
@@ -560,6 +640,11 @@ def _drop_unsupported_models(
             models = [m for m in models if is_supported_cross_encoder(architectures.get(m["id"]) or [])]
             if dropped := before - len(models):
                 log(f"Dropped {dropped} reranker candidate(s) whose architecture vLLM can't serve as a cross-encoder.")
+    elif registry_key == "stts":
+        before = len(models)
+        models = [m for m in models if is_supported_stt(architectures.get(m["id"]) or [])]
+        if dropped := before - len(models):
+            log(f"Dropped {dropped} STT candidate(s) whose architecture vLLM can't serve for transcription.")
     elif registry_key == "llms":
         before = len(models)
         models = [m for m in models if chat_capable.get(m["id"], False)]
@@ -577,7 +662,7 @@ async def fetch_registry_entries(
     log: Callable[[str], None],
     allow_generative_rerankers: bool = False,
 ) -> tuple[str, list[dict[str, Any]]]:
-    """Fetch one registry_key's worth of entries (llms/rerankers/embeddings) from HuggingFace.
+    """Fetch one registry_key's worth of entries (llms/rerankers/embeddings/stts) from HuggingFace.
 
     Shared by the CLI's `main()` and the server's in-process runtime refresh, so both go through
     the exact same fetch/filter/format pipeline. Returns (registry_key, entries); raises on a hard
@@ -605,6 +690,9 @@ async def fetch_registry_entries(
     elif model_type == "embedding":
         models = await collect_embedding_models(session, active)
         registry_key = "embeddings"
+    elif model_type == "stt":
+        models = await collect_stt_models(session, active, log)
+        registry_key = "stts"
     else:
         models = await collect_llm_models(session, active)
         registry_key = "llms"
@@ -680,7 +768,11 @@ if __name__ == "__main__":
     p.add_argument("--top-by-trending", type=int, default=0, metavar="N", help="Fetch top N models sorted by trending score")
     p.add_argument("--raw", action="store_true", help="Output JSON only, suppress progress messages")
     p.add_argument(
-        "--type", choices=["llm", "reranker", "embedding"], default="llm", dest="model_type", help="Model type to fetch (default: llm)"
+        "--type",
+        choices=["llm", "reranker", "embedding", "stt"],
+        default="llm",
+        dest="model_type",
+        help="Model type to fetch (default: llm)",
     )
     p.add_argument("--output", default=None, metavar="PATH", help="Write into PATH, merging into its existing keys, instead of stdout")
     p.add_argument(
