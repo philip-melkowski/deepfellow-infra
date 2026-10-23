@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, urljoin, urlparse
 import aiohttp
 from aiohttp import ClientTimeout, JsonPayload
 from fastapi import HTTPException, Request
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel, TypeAdapter, ValidationError, field_validator
 
 from server.config import AppSettings
@@ -1764,40 +1764,46 @@ class EndpointRegistry:
         try:
             resp = await func()
         except Exception as e:
-            duration = time.perf_counter() - start_time
-            self.metrics_registry.request_duration.labels(model_name=model.name, model_type=model.type).observe(duration)
-            self.metrics_registry.request_total.labels(model_name=model.name, model_type=model.type, status="error").inc()
-            self.metrics_registry.request_errors.labels(model_name=model.name, error_type=_classify_error(e)).inc()
-            self.metrics_registry.requests_in_flight.labels(model_type=model.type).dec()
-            self._remove_usage(model)
+            self._record_request_metrics(model, start_time, _classify_error(e))
             raise
+
+        # A 5xx from the model is passed through to the client unchanged, so it has to be counted from its status.
+        error_type = "http_5xx" if isinstance(resp, Response) and resp.status_code >= 500 else None
 
         if isinstance(resp, StreamingResponse):
 
             async def create_generator() -> AsyncGenerator[Any]:
                 """Add usage for response."""
+                stream_error_type = error_type
                 chunks = list[bytes]()
                 try:
                     async for chunk in resp.body_iterator:
                         if log_payload and isinstance(chunk, bytes):
                             chunks.append(chunk)
                         yield chunk
+                except Exception as e:
+                    # A client disconnect arrives as CancelledError/GeneratorExit (not Exception) and stays a success.
+                    stream_error_type = stream_error_type or _classify_error(e)
+                    raise
                 finally:
                     if log_payload:
                         logger.info(f"DUMP RESPONSE PAYLOAD {b''.join(chunks).decode('utf-8')}")
-                    duration = time.perf_counter() - start_time
-                    self.metrics_registry.request_duration.labels(model_name=model.name, model_type=model.type).observe(duration)
-                    self.metrics_registry.request_total.labels(model_name=model.name, model_type=model.type, status="success").inc()
-                    self.metrics_registry.requests_in_flight.labels(model_type=model.type).dec()
-                    self._remove_usage(model)
+                    self._record_request_metrics(model, start_time, stream_error_type)
 
             return StreamingResponse(create_generator(), media_type=resp.media_type, status_code=resp.status_code, headers=resp.headers)  # pyright: ignore[reportReturnType]
+        self._record_request_metrics(model, start_time, error_type)
+        return resp
+
+    def _record_request_metrics(self, model: RegisteredModel[Any], start_time: float, error_type: str | None) -> None:
+        """Record a finished request to a local model; `error_type` is None for a success."""
         duration = time.perf_counter() - start_time
         self.metrics_registry.request_duration.labels(model_name=model.name, model_type=model.type).observe(duration)
-        self.metrics_registry.request_total.labels(model_name=model.name, model_type=model.type, status="success").inc()
+        status = "success" if error_type is None else "error"
+        self.metrics_registry.request_total.labels(model_name=model.name, model_type=model.type, status=status).inc()
+        if error_type is not None:
+            self.metrics_registry.request_errors.labels(model_name=model.name, error_type=error_type).inc()
         self.metrics_registry.requests_in_flight.labels(model_type=model.type).dec()
         self._remove_usage(model)
-        return resp
 
     def _add_usage(self, model: RegisteredModel[Any]) -> None:
         model.usage += 1
