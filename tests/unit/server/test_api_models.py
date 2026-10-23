@@ -21,6 +21,7 @@ from server.models.api import (
     McpToolCall,
     Model,
     ModelProps,
+    OllamaChatRequest,
     Reasoning,
     ReasoningConfig,
     ReasoningContentItem,
@@ -262,7 +263,7 @@ def test_chat_completion_top_p_out_of_range(top_p: float) -> None:
         ChatCompletionRequest(**_base_chat_req(top_p=top_p))  # pyright: ignore[reportArgumentType]
 
 
-@pytest.mark.parametrize("n", [-1, 129])
+@pytest.mark.parametrize("n", [-1])
 def test_chat_completion_n_out_of_range(n: int) -> None:
     with pytest.raises(ValidationError):
         ChatCompletionRequest(**_base_chat_req(n=n))  # pyright: ignore[reportArgumentType]
@@ -510,3 +511,26 @@ def test_model_props_context_window_defaults_to_none() -> None:
 
     assert props.context_window is None
     assert props.max_context_window is None
+
+
+_CHAT_BASE: dict[str, object] = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+
+
+@pytest.mark.parametrize("overrides", [{"max_tokens": 0}, {"max_completion_tokens": 0}])
+def test_chat_completion_request_rejects_non_positive_token_limits(overrides: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        ChatCompletionRequest.model_validate({**_CHAT_BASE, **overrides})
+
+
+@pytest.mark.parametrize("options", [{"num_predict": -3}, {"temperature": 3.0}])
+def test_ollama_chat_request_rejects_invalid_options(options: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        OllamaChatRequest.model_validate({**_CHAT_BASE, "options": options})
+
+
+def test_ollama_chat_request_drops_unsupported_options() -> None:
+    options = {"temperature": 0.5, "num_gpu": 1, "num_thread": 4, "tfs_z": 1.0, "mirostat": 1, "unknown_option": 1}
+
+    body = OllamaChatRequest.model_validate({**_CHAT_BASE, "options": options})
+
+    assert body.model_dump(exclude_none=True)["options"] == {"temperature": 0.5}

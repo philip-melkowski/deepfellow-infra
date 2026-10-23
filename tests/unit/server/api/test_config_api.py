@@ -56,6 +56,10 @@ def config() -> MagicMock:
     mock.mcp_sse_session_ttl_seconds = 300
     mock.mcp_sse_max_sessions = 128
     mock.standard_proxy_timeout_seconds = 300
+    mock.max_generated_tokens = 131072
+    mock.max_context_tokens = 1048576
+    mock.max_choices = 16
+    mock.max_top_k = 1000
     mock.otel_exporter_otlp_endpoint = "http://localhost:4317"
     mock.otel_tracing_enabled = False
     mock.otel_logging_enabled = False
@@ -760,3 +764,16 @@ def test_update_config_allows_enabling_sentry_without_dsn(
     assert resp.status_code == 200
     assert mock_persist_settings.call_count == 1
     assert mock_init.call_count == 0
+
+
+def test_update_config_rejects_non_positive_generation_limit(client: TestClient, auth_header: dict[str, str]) -> None:
+    response = client.put("/admin/config", json={"max_generated_tokens": 0}, headers=auth_header)
+
+    assert response.status_code == 400
+
+
+def test_update_config_applies_generation_limit(client: TestClient, config: MagicMock, auth_header: dict[str, str]) -> None:
+    response = client.put("/admin/config", json={"max_choices": 4}, headers=auth_header)
+
+    assert response.status_code == 200
+    assert config.max_choices == 4

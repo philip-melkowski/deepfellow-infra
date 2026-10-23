@@ -8,12 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- `/admin/config` limits `max_generated_tokens`, `max_context_tokens`, `max_choices`, `max_top_k`.
 - vLLM speech-to-text (`stt`) models such as Whisper, served on `/v1/audio/transcriptions`.
 - vLLM catalog now lists 50 speech-to-text models, and the catalog refresh fetches them from HuggingFace.
 
 ### Changed
 
 - Default Ollama image is now `0.40.8`; unpinned instances switch on next start and keep their models.
+- LLM requests above the `/admin/config` generation limits get a 422 instead of reaching the model.
+- `n` above `max_choices` (default 16) gets a 422; the previous fixed cap was 128.
+- `max_tokens`, `max_completion_tokens` and `max_output_tokens` of 0 get a 400 (except `/v1/completions`).
+- **Breaking:** Ollama `/api/chat` ignores `options` such as `num_gpu` instead of forwarding them.
+- Ollama `/api/chat` `options` now have bounds, e.g. `num_ctx` < 1 or `temperature` > 2 gets a 400.
+- Ollama `/api/chat` without a positive `num_predict` stops at `max_generated_tokens`.
 
 ### Fixed
 
