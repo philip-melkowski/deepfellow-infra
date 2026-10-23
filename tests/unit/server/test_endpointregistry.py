@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: 2026 Simplito sp. z o.o.
 
+import asyncio
 import json
 import logging
 import time
+from collections.abc import AsyncGenerator
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -11,7 +13,8 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import aiohttp
 import pytest
 from fastapi import HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
+from prometheus_client import CollectorRegistry
 from pydantic import BaseModel, ValidationError
 
 import server.endpointregistry as _er_module
@@ -37,6 +40,7 @@ from server.endpointregistry import (
     post_json_rerank_sglang,
     post_json_responses,
 )
+from server.metrics_registry import MetricsRegistry
 from server.models.api import (
     ChatCompletionRequest,
     CompletionLegacyRequest,
@@ -100,17 +104,16 @@ def make_metrics_registry() -> MagicMock:
     return mr
 
 
-def make_registry() -> EndpointRegistry:
+def make_registry(metrics_registry: MetricsRegistry | None = None) -> EndpointRegistry:
     config = MagicMock()
     config.is_log_payloads_enabled.return_value = False
     parent_infra = make_parent_infra()
     model_tester = MagicMock()
-    metrics_registry = make_metrics_registry()
     return EndpointRegistry(
         config=config,
         parent_infra=parent_infra,
         model_tester=model_tester,
-        metrics_registry=metrics_registry,
+        metrics_registry=metrics_registry or make_metrics_registry(),
     )
 
 
@@ -2966,6 +2969,206 @@ async def test_with_usage_wraps_streaming_response():
 
     assert b"chunk1" in chunks
     assert b"chunk2" in chunks
+
+
+@pytest.fixture
+def metrics_registry() -> MetricsRegistry:
+    return MetricsRegistry(registry=CollectorRegistry(auto_describe=True))
+
+
+@pytest.fixture
+def metered_registry(metrics_registry: MetricsRegistry) -> EndpointRegistry:
+    return make_registry(metrics_registry)
+
+
+@pytest.fixture
+def local_model(metered_registry: EndpointRegistry) -> RegisteredModel[Any]:
+    rid = metered_registry.register_chat_completion("gpt-4", make_props(), make_chat_endpoint(), RegistrationOptions(origin="local"))
+    return metered_registry.registry[rid].registered_model
+
+
+def request_metrics(metrics_registry: MetricsRegistry, model: RegisteredModel[Any]) -> dict[str, float]:
+    def value(name: str, labels: dict[str, str]) -> float:
+        return metrics_registry.registry.get_sample_value(name, labels) or 0.0
+
+    model_labels = {"model_name": model.name, "model_type": model.type}
+    return {
+        "success": value("deepfellow_requests_total", {**model_labels, "status": "success"}),
+        "error": value("deepfellow_requests_total", {**model_labels, "status": "error"}),
+        "duration_count": value("deepfellow_request_duration_seconds_count", model_labels),
+        "in_flight": value("deepfellow_requests_in_flight", {"model_type": model.type}),
+    }
+
+
+def request_errors(metrics_registry: MetricsRegistry, model: RegisteredModel[Any]) -> dict[str, float]:
+    return {
+        sample.labels["error_type"]: sample.value
+        for metric in metrics_registry.request_errors.collect()
+        for sample in metric.samples
+        if sample.name == "deepfellow_request_errors_total" and sample.labels["model_name"] == model.name
+    }
+
+
+async def stream_chunks(*chunks: bytes, error: BaseException | None = None) -> AsyncGenerator[bytes]:
+    for chunk in chunks:
+        yield chunk
+    if error is not None:
+        raise error
+
+
+async def read_stream(response: StreamingResponse) -> list[bytes]:
+    return [cast("bytes", chunk) async for chunk in response.body_iterator]
+
+
+SUCCESS = {"success": 1.0, "error": 0.0, "duration_count": 1.0, "in_flight": 0.0}
+ERROR = {"success": 0.0, "error": 1.0, "duration_count": 1.0, "in_flight": 0.0}
+
+
+@pytest.mark.asyncio
+async def test_with_usage_counts_non_streamed_5xx_as_http_5xx_error(
+    metered_registry: EndpointRegistry, metrics_registry: MetricsRegistry, local_model: RegisteredModel[Any]
+):
+    response = Response(content=b"model failed", status_code=500)
+
+    result = await metered_registry.with_usage(local_model, AsyncMock(return_value=response))
+
+    assert result is response
+    assert request_metrics(metrics_registry, local_model) == ERROR
+    assert request_errors(metrics_registry, local_model) == {"http_5xx": 1.0}
+    assert local_model.usage == 0
+
+
+@pytest.mark.asyncio
+async def test_with_usage_counts_non_streamed_4xx_as_success(
+    metered_registry: EndpointRegistry, metrics_registry: MetricsRegistry, local_model: RegisteredModel[Any]
+):
+    response = Response(content=b"bad request", status_code=400)
+
+    result = await metered_registry.with_usage(local_model, AsyncMock(return_value=response))
+
+    assert result is response
+    assert request_metrics(metrics_registry, local_model) == SUCCESS
+    assert request_errors(metrics_registry, local_model) == {}
+    assert local_model.usage == 0
+
+
+@pytest.mark.asyncio
+async def test_with_usage_counts_streamed_5xx_as_http_5xx_error(
+    metered_registry: EndpointRegistry, metrics_registry: MetricsRegistry, local_model: RegisteredModel[Any]
+):
+    response = StreamingResponse(stream_chunks(b"model ", b"overloaded"), status_code=503)
+
+    result = await metered_registry.with_usage(local_model, AsyncMock(return_value=response))
+    chunks = await read_stream(result)
+
+    assert result.status_code == 503
+    assert chunks == [b"model ", b"overloaded"]
+    assert request_metrics(metrics_registry, local_model) == ERROR
+    assert request_errors(metrics_registry, local_model) == {"http_5xx": 1.0}
+    assert local_model.usage == 0
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_error_type"),
+    [
+        (aiohttp.ClientPayloadError("broken"), "connection_error"),
+        (TimeoutError(), "timeout"),
+        (RuntimeError("boom"), "model_error"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_with_usage_counts_stream_broken_by_model_as_error(
+    metered_registry: EndpointRegistry,
+    metrics_registry: MetricsRegistry,
+    local_model: RegisteredModel[Any],
+    error: Exception,
+    expected_error_type: str,
+):
+    response = StreamingResponse(stream_chunks(b"partial", error=error), status_code=200)
+    result = await metered_registry.with_usage(local_model, AsyncMock(return_value=response))
+
+    with pytest.raises(type(error)):
+        await read_stream(result)
+
+    assert request_metrics(metrics_registry, local_model) == ERROR
+    assert request_errors(metrics_registry, local_model) == {expected_error_type: 1.0}
+    assert local_model.usage == 0
+
+
+@pytest.mark.asyncio
+async def test_with_usage_counts_broken_5xx_stream_once_as_http_5xx(
+    metered_registry: EndpointRegistry, metrics_registry: MetricsRegistry, local_model: RegisteredModel[Any]
+):
+    response = StreamingResponse(stream_chunks(b"partial", error=aiohttp.ClientPayloadError("broken")), status_code=500)
+    result = await metered_registry.with_usage(local_model, AsyncMock(return_value=response))
+
+    with pytest.raises(aiohttp.ClientPayloadError):
+        await read_stream(result)
+
+    assert request_metrics(metrics_registry, local_model) == ERROR
+    assert request_errors(metrics_registry, local_model) == {"http_5xx": 1.0}
+    assert local_model.usage == 0
+
+
+@pytest.mark.asyncio
+async def test_with_usage_counts_successful_stream_as_success(
+    metered_registry: EndpointRegistry, metrics_registry: MetricsRegistry, local_model: RegisteredModel[Any]
+):
+    response = StreamingResponse(stream_chunks(b"hello ", b"world"), status_code=200)
+
+    result = await metered_registry.with_usage(local_model, AsyncMock(return_value=response))
+    chunks = await read_stream(result)
+
+    assert chunks == [b"hello ", b"world"]
+    assert request_metrics(metrics_registry, local_model) == SUCCESS
+    assert request_errors(metrics_registry, local_model) == {}
+    assert local_model.usage == 0
+
+
+@pytest.mark.asyncio
+async def test_with_usage_counts_client_closing_stream_as_success(
+    metered_registry: EndpointRegistry, metrics_registry: MetricsRegistry, local_model: RegisteredModel[Any]
+):
+    response = StreamingResponse(stream_chunks(b"first", b"second"), status_code=200)
+    result = await metered_registry.with_usage(local_model, AsyncMock(return_value=response))
+    body_iterator = cast("AsyncGenerator[bytes]", result.body_iterator)
+
+    first = await anext(body_iterator)
+    await body_iterator.aclose()
+
+    assert first == b"first"
+    assert request_metrics(metrics_registry, local_model) == SUCCESS
+    assert request_errors(metrics_registry, local_model) == {}
+    assert local_model.usage == 0
+
+
+@pytest.mark.asyncio
+async def test_with_usage_counts_cancelled_stream_as_success(
+    metered_registry: EndpointRegistry, metrics_registry: MetricsRegistry, local_model: RegisteredModel[Any]
+):
+    response = StreamingResponse(stream_chunks(b"partial", error=asyncio.CancelledError()), status_code=200)
+    result = await metered_registry.with_usage(local_model, AsyncMock(return_value=response))
+
+    with pytest.raises(asyncio.CancelledError):
+        await read_stream(result)
+
+    assert request_metrics(metrics_registry, local_model) == SUCCESS
+    assert request_errors(metrics_registry, local_model) == {}
+    assert local_model.usage == 0
+
+
+@pytest.mark.asyncio
+async def test_with_usage_counts_exception_before_response_as_error(
+    metered_registry: EndpointRegistry, metrics_registry: MetricsRegistry, local_model: RegisteredModel[Any]
+):
+    func = AsyncMock(side_effect=aiohttp.ClientConnectionError("refused"))
+
+    with pytest.raises(aiohttp.ClientConnectionError):
+        await metered_registry.with_usage(local_model, func)
+
+    assert request_metrics(metrics_registry, local_model) == ERROR
+    assert request_errors(metrics_registry, local_model) == {"connection_error": 1.0}
+    assert local_model.usage == 0
 
 
 def test_add_usage_increments_and_notifies():
