@@ -741,8 +741,12 @@ class LLamacppService(Base2Service[InstalledInfo, DownloadedInfo]):
                         max_context_window=max_context_window,
                         supports_vision=model.supports_vision,
                     ),
-                    chat_completions=ProxyOptions(url=f"{model_info.base_url}/v1/chat/completions", rewrite_model_to=model_id),
-                    completions=ProxyOptions(url=f"{model_info.base_url}/v1/completions", rewrite_model_to=model_id),
+                    chat_completions=ProxyOptions(
+                        url=f"{model_info.base_url}/v1/chat/completions", rewrite_model_to=model_id, forward_extra_fields=True
+                    ),
+                    completions=ProxyOptions(
+                        url=f"{model_info.base_url}/v1/completions", rewrite_model_to=model_id, forward_extra_fields=True
+                    ),
                     responses=ProxyOptions(url=f"{model_info.base_url}/v1/responses", rewrite_model_to=model_id),
                     messages=ProxyOptions(url=f"{model_info.base_url}/v1/messages", rewrite_model_to=model_id),
                     ollama_chat=None,

@@ -449,8 +449,12 @@ class OllamaExternalService(Base2Service[InstalledInfo, DownloadedInfo]):
                     supports_vision=supports_vision,
                     supports_audio=supports_audio,
                 ),
-                chat_completions=ProxyOptions(url=f"{installed_info.base_url}/v1/chat/completions", rewrite_model_to=model_id),
-                completions=ProxyOptions(url=f"{installed_info.base_url}/v1/completions", rewrite_model_to=model_id),
+                chat_completions=ProxyOptions(
+                    url=f"{installed_info.base_url}/v1/chat/completions", rewrite_model_to=model_id, forward_extra_fields=True
+                ),
+                completions=ProxyOptions(
+                    url=f"{installed_info.base_url}/v1/completions", rewrite_model_to=model_id, forward_extra_fields=True
+                ),
                 responses=(
                     ProxyOptions(url=f"{installed_info.base_url}/v1/responses", rewrite_model_to=model_id)
                     if self.support_responses
@@ -782,8 +786,12 @@ class OllamaExternalService(Base2Service[InstalledInfo, DownloadedInfo]):
                                 supports_vision=supports_vision,
                                 supports_audio=supports_audio,
                             ),
-                            chat_completions=ProxyOptions(url=f"{info.base_url}/v1/chat/completions", rewrite_model_to=model_id),
-                            completions=ProxyOptions(url=f"{info.base_url}/v1/completions", rewrite_model_to=model_id),
+                            chat_completions=ProxyOptions(
+                                url=f"{info.base_url}/v1/chat/completions", rewrite_model_to=model_id, forward_extra_fields=True
+                            ),
+                            completions=ProxyOptions(
+                                url=f"{info.base_url}/v1/completions", rewrite_model_to=model_id, forward_extra_fields=True
+                            ),
                             responses=(
                                 ProxyOptions(url=f"{info.base_url}/v1/responses", rewrite_model_to=model_id)
                                 if self.support_responses

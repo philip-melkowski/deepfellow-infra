@@ -3,6 +3,7 @@
 
 """Models for chat completions."""
 
+import re
 from abc import abstractmethod
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, Union
@@ -11,7 +12,7 @@ from uuid import uuid4
 from aiohttp import FormData
 from fastapi import File as FastApiFile
 from fastapi import UploadFile
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from server.utils.logger import logger
 
@@ -28,6 +29,33 @@ EMBEDDINGS_ENDPOINTS = ["/v1/embeddings"]
 STT_ENDPOINTS = ["/v1/audio/transcriptions"]
 TTS_ENDPOINTS = ["/v1/audio/speech"]
 IMG_ENDPOINTS = ["/v1/images/generations"]
+
+# Caps on the flat dict fields (`chat_template_kwargs`, `repetition_detection`). They are precautionary, not derived from any backend.
+# Numeric bounds on the extra sampling fields follow the OpenAI/vLLM specs; `thinking_token_budget` and `top_k` have no upper bound
+# on purpose, since the effective ceiling is the model's context window or vocabulary, which DF-Infra can't know here.
+_FLAT_PARAM_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+_FLAT_PARAM_MAX_STR_LENGTH = 1024
+
+# Backend-specific fields accepted on chat completions. Any other field not declared on the request models is dropped. These are
+# forwarded only to proxies with `ProxyOptions.forward_extra_fields` (self-hosted backends and mesh peers), because remote
+# providers such as OpenAI or Gemini reject unknown parameters with 400.
+CHAT_COMPLETION_EXTRA_FIELDS = frozenset(
+    {
+        "thinking_token_budget",
+        "chat_template_kwargs",
+        "repetition_detection",
+        "top_k",
+        "min_p",
+        "repetition_penalty",
+        "presence_penalty",
+        "frequency_penalty",
+        "logprobs",
+        "parallel_tool_calls",
+    }
+)
+# `presence_penalty`, `frequency_penalty` and `logprobs` were already part of the legacy completions schema and stay forwarded
+# to every backend, as before.
+COMPLETION_LEGACY_EXTRA_FIELDS = frozenset({"thinking_token_budget", "repetition_detection", "top_k", "min_p", "repetition_penalty"})
 
 
 class ImageUrl(BaseModel):
@@ -137,6 +165,50 @@ class ToolChat(BaseModel):
 class ResponseFormat(BaseModel):
     type: Annotated[str, Field(description="The format type, either 'text' or 'json_object'")] = "text"
     json_schema: dict[str, Any] | None = None
+
+
+type FlatParams = dict[str, bool | int | float | str | None]
+
+
+def _validate_flat_params(max_keys: int) -> AfterValidator:
+    """Build a validator accepting only a small, flat dict of scalar values (no nesting, no long strings)."""
+
+    def validate(value: FlatParams | None) -> FlatParams | None:
+        if value is None:
+            return value
+        if len(value) > max_keys:
+            msg = f"at most {max_keys} keys are allowed"
+            raise ValueError(msg)
+        for key, item in value.items():
+            if not _FLAT_PARAM_KEY.match(key):
+                msg = f"invalid key {key!r}"
+                raise ValueError(msg)
+            if isinstance(item, str) and len(item) > _FLAT_PARAM_MAX_STR_LENGTH:
+                msg = f"value of {key!r} is longer than {_FLAT_PARAM_MAX_STR_LENGTH} characters"
+                raise ValueError(msg)
+        return value
+
+    return AfterValidator(validate)
+
+
+_THINKING_TOKEN_BUDGET_DESCRIPTION = (
+    "Maximum number of thinking tokens before the model must answer (-1 means no limit). Self-hosted backends only. "
+    "vLLM rejects values other than -1 unless the model is started with `--reasoning-parser` (set it via the model's extra args)."
+)
+
+
+def _reject_zero_top_k(value: int | None) -> int | None:
+    if value == 0:
+        msg = "top_k=0 is not accepted by every backend (SGLang rejects it); use -1 to disable top_k"
+        raise ValueError(msg)
+    return value
+
+
+type TopK = Annotated[
+    int | None,
+    Field(ge=-1, description="Sample only from the `top_k` most likely tokens (-1 disables; 0 is rejected)."),
+    AfterValidator(_reject_zero_top_k),
+]
 
 
 class ChatCompletionReasoningConfig(BaseModel):
@@ -327,6 +399,38 @@ class ChatCompletionRequest(BaseModel):
             )
         ),
     ] = None
+
+    thinking_token_budget: Annotated[
+        int | None,
+        Field(
+            ge=-1,
+            description=_THINKING_TOKEN_BUDGET_DESCRIPTION,
+        ),
+    ] = None
+    chat_template_kwargs: Annotated[
+        FlatParams | None,
+        Field(description='Extra keyword arguments for the chat template, e.g. `{"enable_thinking": false}`. At most 16 scalar entries.'),
+        _validate_flat_params(16),
+    ] = None
+    repetition_detection: Annotated[
+        FlatParams | None,
+        Field(description="Parameters of the backend's repetition detection. At most 8 scalar entries."),
+        _validate_flat_params(8),
+    ] = None
+    top_k: TopK = None
+    min_p: Annotated[float | None, Field(ge=0.0, le=1.0, description="Minimum token probability relative to the most likely token.")] = None
+    repetition_penalty: Annotated[
+        float | None, Field(gt=0.0, le=2.0, description="Penalty for repeating tokens, 1.0 means no penalty (0 exclusive to 2.0).")
+    ] = None
+    presence_penalty: Annotated[
+        float | None,
+        Field(ge=-2.0, le=2.0, description="Penalize new tokens based on whether they appear in the text so far (-2.0 to 2.0)."),
+    ] = None
+    frequency_penalty: Annotated[
+        float | None, Field(ge=-2.0, le=2.0, description="Penalize new tokens based on their existing frequency (-2.0 to 2.0).")
+    ] = None
+    logprobs: Annotated[bool | None, Field(description="Return the log probability of each output token.")] = None
+    parallel_tool_calls: Annotated[bool | None, Field(description="Whether to allow the model to run tool calls in parallel.")] = None
 
     model_config = {
         "json_schema_extra": {
@@ -868,6 +972,23 @@ class CompletionLegacyRequest(BaseModel):
         float | None, Field(ge=0.0, le=1.0, description="Nucleus sampling - consider tokens with top_p probability mass (0-1).")
     ] = None
     user: Annotated[str | None, Field(description="Unique identifier for end-user to help monitor and detect abuse.")] = None
+    thinking_token_budget: Annotated[
+        int | None,
+        Field(
+            ge=-1,
+            description=_THINKING_TOKEN_BUDGET_DESCRIPTION,
+        ),
+    ] = None
+    repetition_detection: Annotated[
+        FlatParams | None,
+        Field(description="Parameters of the backend's repetition detection. At most 8 scalar entries."),
+        _validate_flat_params(8),
+    ] = None
+    top_k: TopK = None
+    min_p: Annotated[float | None, Field(ge=0.0, le=1.0, description="Minimum token probability relative to the most likely token.")] = None
+    repetition_penalty: Annotated[
+        float | None, Field(gt=0.0, le=2.0, description="Penalty for repeating tokens, 1.0 means no penalty (0 exclusive to 2.0).")
+    ] = None
 
 
 type SortOrder = Literal["asc", "desc"]

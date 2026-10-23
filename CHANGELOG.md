@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Chat completions accept `thinking_token_budget`, `chat_template_kwargs`, `repetition_detection`, `top_k`, `min_p`, `repetition_penalty`, `presence_penalty`, `frequency_penalty`, `logprobs` and `parallel_tool_calls`, passed to self-hosted backends and mesh peers only.
+- Legacy completions (`/v1/completions`) accept `thinking_token_budget`, `repetition_detection`, `top_k`, `min_p` and `repetition_penalty`, passed to self-hosted backends and mesh peers only.
 - `/admin/config` limits `max_generated_tokens`, `max_context_tokens`, `max_choices`, `max_top_k`.
 - vLLM speech-to-text (`stt`) models such as Whisper, served on `/v1/audio/transcriptions`.
 - vLLM catalog now lists 50 speech-to-text models, and the catalog refresh fetches them from HuggingFace.

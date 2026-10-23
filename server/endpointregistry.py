@@ -23,6 +23,8 @@ from server.config import AppSettings
 from server.metrics_registry import MetricsRegistry
 from server.models.api import (
     ALL_LLM_SUFFIXES,
+    CHAT_COMPLETION_EXTRA_FIELDS,
+    COMPLETION_LEGACY_EXTRA_FIELDS,
     LLM_SUFFIX_MAP,
     ApiModel,
     ApiModelProps,
@@ -652,6 +654,9 @@ class ProxyOptions:
     # another DF-Infra node's /custom/{full_path} or /mcp/{full_path}. False (default) strips the prefix — for
     # proxying straight to a backing container, which doesn't know about it.
     forward_full_path: bool = False
+    # Chat/legacy completions proxies only. True forwards backend-specific fields (see CHAT_COMPLETION_EXTRA_FIELDS) — for
+    # self-hosted backends and other DF-Infra nodes. False (default) strips them — for remote providers that reject unknown fields.
+    forward_extra_fields: bool = False
 
     async def get_request_headers(self, request: Request | None) -> dict[str, str]:
         """Get request headers, merging in freshly-computed dynamic headers (e.g. a live OAuth token) last."""
@@ -1351,7 +1356,8 @@ class EndpointRegistry:
             parts = set(ALL_LLM_SUFFIXES) if type == "llm" else set(type.split("-")[1:])
 
             def _proxy(path: str) -> ProxyOptions:
-                return ProxyOptions(url=urljoin(url, path), headers=headers)
+                # The peer decides what to strip, since only it knows its backend.
+                return ProxyOptions(url=urljoin(url, path), headers=headers, forward_extra_fields=True)
 
             self.register_chat_completion_as_proxy(
                 model=model_id,
@@ -1841,6 +1847,16 @@ async def post_json(
 ) -> StreamingResponse:
     """Make HTTP POST request sending data as JSON."""
     raw = data.model_dump(exclude_none=True)
+    if not options.forward_extra_fields:
+        extra_fields = (
+            CHAT_COMPLETION_EXTRA_FIELDS
+            if isinstance(data, ChatCompletionRequest)
+            else COMPLETION_LEGACY_EXTRA_FIELDS
+            if isinstance(data, CompletionLegacyRequest)
+            else frozenset()
+        )
+        for field in extra_fields:
+            raw.pop(field, None)
     if options.remove_model:
         del raw["model"]
     if options.rewrite_model_to:

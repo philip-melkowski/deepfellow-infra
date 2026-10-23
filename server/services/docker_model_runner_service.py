@@ -272,10 +272,12 @@ class DockerModelRunnerService(Base2Service[InstalledInfo, DownloadedInfo]):
                 chat_completions=ProxyOptions(
                     url=f"{installed_info.base_url}/engines/v1/chat/completions",
                     rewrite_model_to=model_id,
+                    forward_extra_fields=True,
                 ),
                 completions=ProxyOptions(
                     url=f"{installed_info.base_url}/engines/v1/completions",
                     rewrite_model_to=model_id,
+                    forward_extra_fields=True,
                 ),
                 responses=None,
                 messages=None,
@@ -596,10 +598,12 @@ class DockerModelRunnerService(Base2Service[InstalledInfo, DownloadedInfo]):
                     chat_completions=ProxyOptions(
                         url=f"{info.base_url}/engines/v1/chat/completions",
                         rewrite_model_to=model_id,
+                        forward_extra_fields=True,
                     ),
                     completions=ProxyOptions(
                         url=f"{info.base_url}/engines/v1/completions",
                         rewrite_model_to=model_id,
+                        forward_extra_fields=True,
                     ),
                     responses=None,
                     messages=None,
