@@ -3266,6 +3266,85 @@ async def test_post_json_sends_request_and_returns_streaming_response():
     assert result is mock_streaming
 
 
+# Hard-coded on purpose: iterating over the production constants would not catch a typo in them.
+_CHAT_EXTRA_FIELDS_PAYLOAD: dict[str, object] = {
+    "thinking_token_budget": 300,
+    "chat_template_kwargs": {"enable_thinking": True},
+    "repetition_detection": {"max_pattern_size": 20},
+    "top_k": 40,
+    "min_p": 0.05,
+    "repetition_penalty": 1.1,
+    "presence_penalty": 0.5,
+    "frequency_penalty": -0.5,
+    "logprobs": True,
+    "parallel_tool_calls": False,
+}
+_LEGACY_EXTRA_FIELDS_PAYLOAD: dict[str, object] = {
+    "thinking_token_budget": 300,
+    "repetition_detection": {"max_pattern_size": 20},
+    "top_k": 40,
+    "min_p": 0.05,
+    "repetition_penalty": 1.1,
+}
+
+
+async def _post_chat_extra_fields(options: ProxyOptions) -> dict[str, object]:
+    body = ChatCompletionRequest(  # pyright: ignore[reportCallIssue]
+        model="m",
+        messages=[{"role": "user", "content": "hi"}],  # pyright: ignore[reportArgumentType]
+        reasoning_effort="low",
+        **_CHAT_EXTRA_FIELDS_PAYLOAD,  # pyright: ignore[reportArgumentType]
+    )
+    mock_http_response = MagicMock()
+    mock_http_response.as_streaming_response.return_value = MagicMock()
+    with patch("server.endpointregistry.make_http_request", new_callable=AsyncMock, return_value=mock_http_response) as mock_req:
+        await post_json(body, options)
+    return json.loads(mock_req.call_args.kwargs["data"]._value)
+
+
+@pytest.mark.asyncio
+async def test_post_json_forwards_extra_chat_fields_when_enabled():
+    sent = await _post_chat_extra_fields(ProxyOptions(url="http://vllm/", forward_extra_fields=True))
+
+    assert {field: sent[field] for field in _CHAT_EXTRA_FIELDS_PAYLOAD} == _CHAT_EXTRA_FIELDS_PAYLOAD
+
+
+@pytest.mark.asyncio
+async def test_post_json_strips_extra_chat_fields_by_default():
+    sent = await _post_chat_extra_fields(ProxyOptions(url="http://api.openai.com/"))
+
+    assert not set(_CHAT_EXTRA_FIELDS_PAYLOAD) & set(sent)
+    assert sent["reasoning_effort"] == "low"
+
+
+@pytest.mark.asyncio
+async def test_post_json_keeps_legacy_openai_fields_for_remote_completions():
+    body = CompletionLegacyRequest(model="m", prompt="hi", presence_penalty=0.5, logprobs=2, **_LEGACY_EXTRA_FIELDS_PAYLOAD)  # pyright: ignore[reportArgumentType]
+    mock_http_response = MagicMock()
+    mock_http_response.as_streaming_response.return_value = MagicMock()
+
+    with patch("server.endpointregistry.make_http_request", new_callable=AsyncMock, return_value=mock_http_response) as mock_req:
+        await post_json(body, ProxyOptions(url="http://api.openai.com/"))
+
+    sent = json.loads(mock_req.call_args.kwargs["data"]._value)
+    assert sent["presence_penalty"] == 0.5
+    assert sent["logprobs"] == 2
+    assert not set(_LEGACY_EXTRA_FIELDS_PAYLOAD) & set(sent)
+
+
+@pytest.mark.asyncio
+async def test_post_json_forwards_legacy_extra_fields_when_enabled():
+    body = CompletionLegacyRequest(model="m", prompt="hi", **_LEGACY_EXTRA_FIELDS_PAYLOAD)  # pyright: ignore[reportArgumentType]
+    mock_http_response = MagicMock()
+    mock_http_response.as_streaming_response.return_value = MagicMock()
+
+    with patch("server.endpointregistry.make_http_request", new_callable=AsyncMock, return_value=mock_http_response) as mock_req:
+        await post_json(body, ProxyOptions(url="http://vllm/", forward_extra_fields=True))
+
+    sent = json.loads(mock_req.call_args.kwargs["data"]._value)
+    assert {field: sent[field] for field in _LEGACY_EXTRA_FIELDS_PAYLOAD} == _LEGACY_EXTRA_FIELDS_PAYLOAD
+
+
 @pytest.mark.asyncio
 async def test_post_json_removes_model_when_requested():
     class FakeBody(BaseModel):

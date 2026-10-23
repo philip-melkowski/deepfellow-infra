@@ -1600,8 +1600,12 @@ class OllamaService(Base2Service[InstalledInfo, DownloadedInfo]):
                                 supports_vision=capabilities.supports_vision,
                                 supports_audio=capabilities.supports_audio,
                             ),
-                            chat_completions=ProxyOptions(url=f"{info.base_url}/v1/chat/completions", rewrite_model_to=rewrite_model_to),
-                            completions=ProxyOptions(url=f"{info.base_url}/v1/completions", rewrite_model_to=rewrite_model_to),
+                            chat_completions=ProxyOptions(
+                                url=f"{info.base_url}/v1/chat/completions", rewrite_model_to=rewrite_model_to, forward_extra_fields=True
+                            ),
+                            completions=ProxyOptions(
+                                url=f"{info.base_url}/v1/completions", rewrite_model_to=rewrite_model_to, forward_extra_fields=True
+                            ),
                             responses=ProxyOptions(url=f"{info.base_url}/v1/responses", rewrite_model_to=rewrite_model_to),
                             messages=ProxyOptions(url=f"{info.base_url}/v1/messages", rewrite_model_to=rewrite_model_to),
                             ollama_chat=ProxyOptions(url=f"{info.base_url}/api/chat", rewrite_model_to=rewrite_model_to),

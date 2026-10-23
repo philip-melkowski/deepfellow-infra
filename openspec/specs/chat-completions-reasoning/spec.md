@@ -66,3 +66,38 @@ DeepFellow forwards backend responses as an unparsed byte stream.
   empty until reasoning is complete, then the final answer streams normally in
   `delta.content`. Since DeepFellow forwards bytes unmodified, this exact shape is
   what SHALL reach the client once `reasoning_effort` survives request validation.
+
+### Requirement: Backend-specific sampling fields are accepted and forwarded only to backends that support them
+The `/v1/chat/completions` endpoint SHALL accept the optional fields `thinking_token_budget`,
+`chat_template_kwargs`, `repetition_detection`, `top_k`, `min_p`, `repetition_penalty`,
+`presence_penalty`, `frequency_penalty`, `logprobs` and `parallel_tool_calls`, and the
+`/v1/completions` endpoint SHALL accept `thinking_token_budget`, `repetition_detection`, `top_k`,
+`min_p` and `repetition_penalty`. Every other undeclared field SHALL still be dropped. Values SHALL
+be bounded: `thinking_token_budget` and `top_k` at least -1 with no upper bound (the ceiling is
+the model's context window or vocabulary, unknown to DeepFellow), `top_k` of 0 rejected because
+SGLang does not accept it (-1 disables `top_k` on every backend), `min_p` 0-1, `repetition_penalty`
+above 0 up to 2, `presence_penalty` and `frequency_penalty` -2-2; `chat_template_kwargs`
+(at most 16 keys) and `repetition_detection` (at most 8 keys) SHALL be flat dicts of scalars with
+identifier-like keys and strings up to 1024 characters. Out-of-bounds values SHALL fail with 422.
+
+These fields SHALL be forwarded to a backend only when its proxy sets `forward_extra_fields`:
+enabled for vLLM, SGLang, llama.cpp, Ollama (local and external), Docker Model Runner and proxies
+to other mesh nodes; disabled by default, so remote providers (OpenAI, Google AI, Claude, DeepSeek,
+Kimi, Ollama Cloud) never receive them. `presence_penalty`, `frequency_penalty` and `logprobs` on
+`/v1/completions` remain forwarded to all backends as before.
+
+#### Scenario: Self-hosted backend receives the thinking budget
+- **WHEN** a client sends `thinking_token_budget: 300` for a model served by vLLM
+- **THEN** the JSON body sent to vLLM SHALL contain `thinking_token_budget: 300`
+
+#### Scenario: Remote provider does not receive backend-specific fields
+- **WHEN** a client sends `thinking_token_budget: 300` or `top_k: 40` for a model proxied to OpenAI
+- **THEN** neither field SHALL be present in the JSON body sent to the provider
+
+#### Scenario: Fields pass through a mesh hop
+- **WHEN** a request with `thinking_token_budget` targets a model registered from a mesh peer
+- **THEN** the field SHALL be forwarded to the peer, which applies its own backend's rule
+
+#### Scenario: Undeclared field is dropped
+- **WHEN** a client sends `guided_regex` or `logits_processors`
+- **THEN** the field SHALL not be forwarded to any backend

@@ -317,6 +317,86 @@ def test_chat_completion_reasoning_both_fields_forwarded_without_disambiguation(
     assert raw["reasoning"] == {"effort": "high"}
 
 
+_EXTRA_FIELDS_PAYLOAD: dict[str, object] = {
+    "thinking_token_budget": 300,
+    "chat_template_kwargs": {"enable_thinking": True},
+    "repetition_detection": {"max_pattern_size": 20},
+    "top_k": 40,
+    "min_p": 0.05,
+    "repetition_penalty": 1.1,
+    "presence_penalty": 0.5,
+    "frequency_penalty": -0.5,
+    "logprobs": True,
+    "parallel_tool_calls": False,
+}
+
+
+def test_chat_completion_extra_fields_accepted_and_dumped() -> None:
+    req = ChatCompletionRequest(**_base_chat_req(**_EXTRA_FIELDS_PAYLOAD))  # pyright: ignore[reportArgumentType]
+
+    raw = req.model_dump(exclude_none=True)
+    assert {key: raw[key] for key in _EXTRA_FIELDS_PAYLOAD} == _EXTRA_FIELDS_PAYLOAD
+
+
+def test_chat_completion_unlisted_extra_fields_are_dropped() -> None:
+    req = ChatCompletionRequest(**_base_chat_req(guided_regex=".*", logits_processors=["os.system"]))  # pyright: ignore[reportArgumentType]
+
+    raw = req.model_dump(exclude_none=True)
+    assert "guided_regex" not in raw
+    assert "logits_processors" not in raw
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("thinking_token_budget", -2),
+        ("top_k", -2),
+        ("top_k", 0),
+        ("min_p", 1.5),
+        ("repetition_penalty", 0),
+        ("repetition_penalty", 2.5),
+        ("presence_penalty", 2.5),
+        ("frequency_penalty", -2.5),
+        ("chat_template_kwargs", {"nested": {"a": 1}}),
+        ("chat_template_kwargs", {"bad key": 1}),
+        ("chat_template_kwargs", {"k": "x" * 1025}),
+        ("chat_template_kwargs", {f"k{i}": i for i in range(17)}),
+        ("repetition_detection", {f"k{i}": i for i in range(9)}),
+    ],
+)
+def test_chat_completion_extra_fields_out_of_bounds(field: str, value: object) -> None:
+    with pytest.raises(ValidationError):
+        ChatCompletionRequest(**_base_chat_req(**{field: value}))  # pyright: ignore[reportArgumentType]
+
+
+@pytest.mark.parametrize("field", ["chat_template_kwargs", "repetition_detection"])
+def test_chat_completion_flat_params_explicit_none_accepted(field: str) -> None:
+    req = ChatCompletionRequest(**_base_chat_req(**{field: None}))  # pyright: ignore[reportArgumentType]
+
+    assert getattr(req, field) is None
+
+
+@pytest.mark.parametrize(("field", "value"), [("thinking_token_budget", -1), ("thinking_token_budget", 1_000_000), ("top_k", 50_000)])
+def test_chat_completion_unbounded_extra_fields_accept_large_values(field: str, value: int) -> None:
+    req = ChatCompletionRequest(**_base_chat_req(**{field: value}))  # pyright: ignore[reportArgumentType]
+
+    assert req.model_dump(exclude_none=True)[field] == value
+
+
+def test_completion_legacy_extra_fields_accepted() -> None:
+    req = CompletionLegacyRequest(model="m", prompt="hi", thinking_token_budget=10, top_k=5, min_p=0.1, repetition_penalty=1.2)
+
+    raw = req.model_dump(exclude_none=True)
+    assert raw["thinking_token_budget"] == 10
+    assert raw["top_k"] == 5
+
+
+@pytest.mark.parametrize("value", [0, -2])
+def test_completion_legacy_top_k_out_of_bounds(value: int) -> None:
+    with pytest.raises(ValidationError):
+        CompletionLegacyRequest(model="m", prompt="hi", top_k=value)
+
+
 def test_chat_completion_response_format_json_object_without_schema() -> None:
     """`json_schema` is optional per the OpenAI spec — omitting it (the normal `json_object` case)
     must not raise, or forcing JSON mode on any downstream LLM call becomes impossible."""
