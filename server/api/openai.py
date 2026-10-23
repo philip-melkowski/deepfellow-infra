@@ -7,7 +7,8 @@ from typing import Annotated
 
 from fastapi import APIRouter, Body, Depends, Form, Path, Query, Request
 
-from server.core.dependencies import auth_server, get_endpoint_registry
+from server.config import AppSettings
+from server.core.dependencies import auth_server, get_config, get_endpoint_registry
 from server.endpointregistry import EndpointRegistry
 from server.models.api import (
     ApiModel,
@@ -28,6 +29,7 @@ from server.models.api import (
     ResponsesResponse,
 )
 from server.models.common import StarletteResponse
+from server.utils.request_limits import apply_default_generation_limits, enforce_generation_limits
 from server.utils.validators import SafePath
 
 router = APIRouter(prefix="", tags=["AI Endpoints"])
@@ -74,8 +76,10 @@ async def on_messages(
     body: Annotated[MessagesRequest, Body(...)],
     _: Annotated[str, Depends(auth_server)],
     endpoint_registry: Annotated[EndpointRegistry, Depends(get_endpoint_registry)],
+    config: Annotated[AppSettings, Depends(get_config)],
 ) -> MessagesResponse | StarletteResponse:
     """Process messages request."""
+    enforce_generation_limits(body, config)
     return await endpoint_registry.execute_messages(body, request)
 
 
@@ -85,8 +89,10 @@ async def on_responses(
     body: Annotated[ResponsesRequest, Body(...)],
     _: Annotated[str, Depends(auth_server)],
     endpoint_registry: Annotated[EndpointRegistry, Depends(get_endpoint_registry)],
+    config: Annotated[AppSettings, Depends(get_config)],
 ) -> ResponsesResponse | StarletteResponse:
     """Process responses request."""
+    enforce_generation_limits(body, config)
     return await endpoint_registry.execute_responses(body, request)
 
 
@@ -96,8 +102,10 @@ async def on_chat_completions(
     body: Annotated[ChatCompletionRequest, Body(...)],
     _: Annotated[str, Depends(auth_server)],
     endpoint_registry: Annotated[EndpointRegistry, Depends(get_endpoint_registry)],
+    config: Annotated[AppSettings, Depends(get_config)],
 ) -> StarletteResponse:
     """Process chat completions request."""
+    enforce_generation_limits(body, config)
     return await endpoint_registry.execute_chat_completion(body, request)
 
 
@@ -107,8 +115,10 @@ async def on_completions(
     body: Annotated[CompletionLegacyRequest, Body(...)],
     _: Annotated[str, Depends(auth_server)],
     endpoint_registry: Annotated[EndpointRegistry, Depends(get_endpoint_registry)],
+    config: Annotated[AppSettings, Depends(get_config)],
 ) -> StarletteResponse:
     """Process completions request."""
+    enforce_generation_limits(body, config)
     return await endpoint_registry.execute_completion(body, request)
 
 
@@ -118,8 +128,11 @@ async def on_ollama_chat(
     body: Annotated[OllamaChatRequest, Body(...)],
     _: Annotated[str, Depends(auth_server)],
     endpoint_registry: Annotated[EndpointRegistry, Depends(get_endpoint_registry)],
+    config: Annotated[AppSettings, Depends(get_config)],
 ) -> StarletteResponse:
     """Process completions request."""
+    enforce_generation_limits(body, config)
+    apply_default_generation_limits(body, config)
     return await endpoint_registry.execute_ollama_chat(body, request)
 
 

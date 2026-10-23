@@ -61,6 +61,12 @@ class AppSettings(BaseSettings):
 
     standard_proxy_timeout_seconds: int = 600
 
+    # Upper bounds for client-supplied generation parameters, enforced on the LLM endpoints.
+    max_generated_tokens: int = 131072  # max_tokens, max_completion_tokens, max_output_tokens, num_predict
+    max_context_tokens: int = 1048576  # Ollama num_ctx, num_keep, repeat_last_n
+    max_choices: int = 16  # n
+    max_top_k: int = 1000  # top_k
+
     # metrics are authorized by HTTPBasicAuth
     metrics_username: str = ""
     metrics_password: SecretStr = SecretStr("")

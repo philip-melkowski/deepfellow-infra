@@ -13,7 +13,8 @@ from fastapi.responses import JSONResponse
 from starlette.testclient import TestClient
 
 from server.api.openai import router
-from server.core.dependencies import auth_server, get_endpoint_registry
+from server.config import AppSettings
+from server.core.dependencies import auth_server, get_config, get_endpoint_registry
 from server.error_handlers import register_exception_handlers
 from server.models.api import ApiModel, ApiModelProps, ApiModels
 
@@ -50,6 +51,7 @@ def _make_app(registry: MagicMock) -> FastAPI:
     app.include_router(router)
     app.dependency_overrides[auth_server] = lambda: "test-key"
     app.dependency_overrides[get_endpoint_registry] = lambda: registry
+    app.dependency_overrides[get_config] = lambda: AppSettings()  # pyright: ignore[reportCallIssue]
     return app
 
 

@@ -56,6 +56,11 @@ class DynamicSettings(BaseModel):
 
     standard_proxy_timeout_seconds: int = 600
 
+    max_generated_tokens: Annotated[int, Field(ge=1)] = 131072
+    max_context_tokens: Annotated[int, Field(ge=1)] = 1048576
+    max_choices: Annotated[int, Field(ge=1)] = 16
+    max_top_k: Annotated[int, Field(ge=1)] = 1000
+
     metrics_username: str = ""
     metrics_password: SecretStr = SecretStr("")
 

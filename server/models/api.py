@@ -215,7 +215,6 @@ class ChatCompletionRequest(BaseModel):
         int | None,
         Field(
             ge=0,
-            le=128,
             description=(
                 "How many chat completion choices to generate for each input message."
                 "Keep `n` as `1` to receive one choice per input message."
@@ -234,15 +233,17 @@ class ChatCompletionRequest(BaseModel):
     max_completion_tokens: Annotated[
         int | None,
         Field(
+            ge=1,
             description=(
                 "An upper bound for the number of tokens that can be generated for a completion, including visible "
                 "output tokens and reasoning tokens."
-            )
+            ),
         ),
     ] = None
     max_tokens: Annotated[
         int | None,
         Field(
+            ge=1,
             description=(
                 "The maximum number of tokens that can be generated in the chat completion. This value can be "
                 "used to control costs for text generated via API. This value is now deprecated in favor of "
@@ -848,7 +849,7 @@ class CompletionLegacyRequest(BaseModel):
     ] = None
     logprobs: Annotated[int | None, Field(ge=0, le=5, description="Include log probabilities on the most likely tokens (max 5).")] = None
     max_tokens: Annotated[int | None, Field(ge=0, description="Maximum number of tokens to generate in the completion.")] = None
-    n: Annotated[int | None, Field(ge=1, le=128, description="How many completions to generate for each prompt.")] = None
+    n: Annotated[int | None, Field(ge=1, description="How many completions to generate for each prompt.")] = None
     presence_penalty: Annotated[
         float | None,
         Field(ge=-2.0, le=2.0, description="Penalize new tokens based on whether they appear in the text so far (-2.0 to 2.0)."),
@@ -1527,6 +1528,7 @@ class ResponsesRequest(BaseModel):
     max_output_tokens: Annotated[
         int | None,
         Field(
+            ge=1,
             description=(
                 "An upper bound for the number of tokens that can be generated for a response, "
                 "including visible output tokens and reasoning tokens."
@@ -1640,18 +1642,28 @@ class OllamaChatMessage(BaseModel):
 
 
 class OllamaOptions(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    # Per-request options of Ollama's `api.Options`; `num_ctx` is kept but bounded by `max_context_tokens`.
+    # Anything else - runner/hardware options (`num_gpu`, `num_thread`, `num_batch`, `main_gpu`, `use_mmap`) and options
+    # Ollama no longer supports (`mirostat*`, `tfs_z`, `penalize_newline`) - is dropped, not forwarded, mirroring Ollama,
+    # which ignores unknown options with a warning.
+    model_config = ConfigDict(extra="ignore")
 
-    num_ctx: int | None = None
-    repeat_last_n: int | None = None
-    repeat_penalty: float | None = None
-    temperature: float | None = None
+    num_ctx: Annotated[int | None, Field(ge=1)] = None
+    # Ollama treats a negative or missing `num_predict` as "up to 10 x num_ctx"; Infra replaces it with
+    # `max_generated_tokens` before forwarding (see `server/utils/request_limits.py`).
+    num_predict: Annotated[int | None, Field(ge=-2)] = None
+    num_keep: Annotated[int | None, Field(ge=-1)] = None
+    repeat_last_n: Annotated[int | None, Field(ge=-1)] = None
+    repeat_penalty: Annotated[float | None, Field(ge=0.0, le=10.0)] = None
+    presence_penalty: Annotated[float | None, Field(ge=-2.0, le=2.0)] = None
+    frequency_penalty: Annotated[float | None, Field(ge=-2.0, le=2.0)] = None
+    temperature: Annotated[float | None, Field(ge=0.0, le=2.0)] = None
     seed: int | None = None
-    stop: str | None = None
-    num_predict: int | None = None
-    top_k: int | None = None
-    top_p: float | None = None
-    min_p: float | None = None
+    stop: str | list[str] | None = None
+    top_k: Annotated[int | None, Field(ge=0)] = None
+    top_p: Annotated[float | None, Field(ge=0.0, le=1.0)] = None
+    min_p: Annotated[float | None, Field(ge=0.0, le=1.0)] = None
+    typical_p: Annotated[float | None, Field(ge=0.0, le=1.0)] = None
 
 
 class OllamaChatRequest(BaseModel):
@@ -2210,7 +2222,7 @@ type ToolUnion = Tool | ToolBash20250124 | ToolTextEditor20250124 | ToolTextEdit
 
 
 class MessagesRequest(BaseModel):
-    max_tokens: int = 8000
+    max_tokens: Annotated[int, Field(ge=1)] = 8000
     messages: list[MessageParam]
     model: str
     metadata: Metadata | None = None
