@@ -21,7 +21,7 @@ import re
 import shutil
 import sys
 from pathlib import Path
-from typing import Literal, NotRequired, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 import aiofiles
 import aiohttp
@@ -31,7 +31,9 @@ import aiohttp
 
 CACHE_DIR = Path("./ollama")
 BASE_URL = "https://ollama.com"
+REGISTRY_URL = "https://registry.ollama.ai"
 HEADERS = {"User-Agent": "Mozilla/5.0"}
+MODEL_LAYER_MEDIA_TYPE = "application/vnd.ollama.image.model"
 
 Category = Literal["embeddings", "llms", "txt2img", "decision"]
 
@@ -60,6 +62,36 @@ def extract_size(raw: str) -> str:
     """
     text = re.sub(r"<[^>]+>", "", raw).strip()
     return text if _SIZE_RE.match(text) else ""
+
+
+def format_size(size: int) -> str:
+    """Format a byte count the way ollama.com does: one decimal below 10, whole numbers above (e.g. "9.5GB", "834MB")."""
+    value = float(size)
+    units = ["B", "KB", "MB", "GB", "TB"]
+    index = 0
+    while round(value) >= 1000 and index < len(units) - 1:
+        value /= 1000
+        index += 1
+    unit = units[index]
+    if round(value, 1) < 10:
+        return f"{value:.1f}{unit}"
+    return f"{round(value)}{unit}"
+
+
+def manifest_url(name: str) -> str:
+    """Return the registry manifest URL for a model name such as "nimble", "nimble:9b" or "user/model:tag"."""
+    path, _, tag = name.partition(":")
+    if "/" not in path:
+        path = f"library/{path}"
+    return f"{REGISTRY_URL}/v2/{path}/manifests/{tag or 'latest'}"
+
+
+def size_from_manifest(manifest: str) -> str:
+    """Return the download size of a registry manifest, or "" when it has no model weights (e.g. a cloud model)."""
+    layers: list[dict[str, Any]] = json.loads(manifest).get("layers", [])
+    if not any(layer.get("mediaType") == MODEL_LAYER_MEDIA_TYPE for layer in layers):
+        return ""
+    return format_size(sum(int(layer.get("size", 0)) for layer in layers))
 
 
 class MinJson(TypedDict):
@@ -321,6 +353,30 @@ def parse_tags_full(html: str) -> list[ModelEntry]:
     return entries
 
 
+async def fill_sizes_from_manifests(
+    session: aiohttp.ClientSession,
+    semaphore: asyncio.Semaphore,
+    entries: list[ModelEntry],
+    use_cache: bool,
+) -> list[ModelEntry]:
+    """Fill sizes the library pages leave empty from the registry manifest.
+
+    ollama.com shows a size range ("9.3GB - 9.5GB") for a tag that resolves to a different variant per platform. The
+    registry serves the manifest Ollama pulls on Linux, so the sum of its layers is the size Infra downloads.
+    """
+    for entry in entries:
+        if entry["size"]:
+            continue
+        name = entry["name"]
+        cache_path = CACHE_DIR / "manifests" / f"{name.replace('/', '_').replace(':', '_')}.json"
+        async with semaphore:
+            try:
+                entry["size"] = size_from_manifest(await fetch_cached(session, manifest_url(name), cache_path, use_cache))
+            except Exception as exc:
+                print(f"  {name} manifest - failed: {exc}", file=sys.stderr)
+    return entries
+
+
 async def fetch_model_tags(
     session: aiohttp.ClientSession,
     semaphore: asyncio.Semaphore,
@@ -345,7 +401,7 @@ async def fetch_model_tags(
     hash_map = parse_tags_hashes(tags_html)
     for entry in entries:
         entry["hash"] = hash_map.get(entry["name"], "")
-    return category, name, deduplicate_by_hash(entries)
+    return category, name, await fill_sizes_from_manifests(session, semaphore, deduplicate_by_hash(entries), use_cache)
 
 
 async def fetch_extra_model(
@@ -375,25 +431,27 @@ async def fetch_extra_model(
             print(f"  {spec} (extra) - failed: {exc}", file=sys.stderr)
             return category, model_path, []
 
-        if specific_tag:
-            full_name = f"{model_path}:{specific_tag}"
-            matched = [e for e in parse_tags_full(tags_html) if e["name"] == full_name]
-            return category, model_path, matched
+        model_html = ""
+        if not specific_tag:
+            model_candidates = [f"{BASE_URL}/library/{model_path}", f"{BASE_URL}/{model_path}"]
+            model_cache = CACHE_DIR / "models" / f"{model_path.replace('/', '_')}.html"
+            try:
+                model_html = await fetch_with_fallback(session, model_candidates, model_cache, use_cache)
+            except Exception as exc:
+                print(f"  {spec} (extra) model page - failed: {exc}", file=sys.stderr)
+                return category, model_path, []
 
-        model_candidates = [f"{BASE_URL}/library/{model_path}", f"{BASE_URL}/{model_path}"]
-        model_cache = CACHE_DIR / "models" / f"{model_path.replace('/', '_')}.html"
-        try:
-            model_html = await fetch_with_fallback(session, model_candidates, model_cache, use_cache)
-        except Exception as exc:
-            print(f"  {spec} (extra) model page - failed: {exc}", file=sys.stderr)
-            return category, model_path, []
+    if specific_tag:
+        full_name = f"{model_path}:{specific_tag}"
+        matched = [e for e in parse_tags_full(tags_html) if e["name"] == full_name]
+        return category, model_path, await fill_sizes_from_manifests(session, semaphore, matched, use_cache)
 
     only_tags = pick_tags.get(model_path)
     entries = parse_model_page(model_html, only_tags)
     hash_map = parse_tags_hashes(tags_html)
     for entry in entries:
         entry["hash"] = hash_map.get(entry["name"], "")
-    return category, model_path, deduplicate_by_hash(entries)
+    return category, model_path, await fill_sizes_from_manifests(session, semaphore, deduplicate_by_hash(entries), use_cache)
 
 
 async def build_min_json(use_cache: bool, concurrency: int, extra_specs: ExtraSpec) -> MinJson:
