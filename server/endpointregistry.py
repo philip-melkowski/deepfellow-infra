@@ -47,6 +47,7 @@ from server.models.api import (
     OllamaChatRequest,
     RerankRequest,
     ResponsesRequest,
+    SystemOneRequest,
 )
 from server.models.common import JsonSerializable, StarletteResponse
 from server.utils.core import HttpClientError, HttpResponse, Utils, make_http_request
@@ -738,6 +739,7 @@ class EndpointRegistry:
         self.custom_endpoints = Endpoint[CustomEndpoint](self.registry, self.parent_infra)
         self.images_generations_endpoints = Endpoint[SimpleEndpoint[ImagesRequest]](self.registry, self.parent_infra)
         self.rerank_endpoints = Endpoint[SimpleEndpoint[RerankRequest]](self.registry, self.parent_infra)
+        self.systemone_endpoints = Endpoint[SimpleEndpoint[SystemOneRequest]](self.registry, self.parent_infra)
         self.mcp_endpoints = Endpoint[McpEndpoint](self.registry, self.parent_infra)
         self.response_item_store = ResponseItemStore()
         self._proxy_api_keys = dict[str, str]()
@@ -769,6 +771,8 @@ class EndpointRegistry:
             models.append(model)
         for model in self.rerank_endpoints.get_models():
             models.append(model)
+        for model in self.systemone_endpoints.get_models():
+            models.append(model)
         for model in self.mcp_endpoints.get_healthy_models():
             models.append(model)
         for model in self.custom_endpoints.get_models():
@@ -792,6 +796,7 @@ class EndpointRegistry:
         models.extend(self.audio_transcriptions_endpoints.list_models())
         models.extend(self.images_generations_endpoints.list_models())
         models.extend(self.rerank_endpoints.list_models())
+        models.extend(self.systemone_endpoints.list_models())
         models.extend(self.custom_endpoints.list_models())
         models.extend(self.mcp_endpoints.list_models())
         return models
@@ -813,6 +818,7 @@ class EndpointRegistry:
         models.extend(self.audio_transcriptions_endpoints.list_models(exclude))
         models.extend(self.images_generations_endpoints.list_models(exclude))
         models.extend(self.rerank_endpoints.list_models(exclude))
+        models.extend(self.systemone_endpoints.list_models(exclude))
         models.extend(self.custom_endpoints.list_models(exclude))
         models.extend(self.mcp_endpoints.list_models(exclude))
         return models
@@ -826,6 +832,7 @@ class EndpointRegistry:
             self.audio_transcriptions_endpoints,
             self.images_generations_endpoints,
             self.rerank_endpoints,
+            self.systemone_endpoints,
         ):
             if model_id in reg.models:
                 return True
@@ -1046,6 +1053,34 @@ class EndpointRegistry:
     def unregister_rerank(self, model: str, registration_id: RegistrationId) -> None:
         """Unregister rerank for given model."""
         self.rerank_endpoints.remove_model(model, registration_id)
+
+    def register_systemone(
+        self,
+        model: str,
+        props: ModelProps,
+        endpoint: SimpleEndpoint[SystemOneRequest],
+        registration_options: RegistrationOptions | None,
+    ) -> RegistrationId:
+        """Register systemone (decision model) endpoint for given model."""
+        return self.systemone_endpoints.add_model(model, props, endpoint, "decision", registration_options)
+
+    def register_systemone_as_proxy(
+        self,
+        model: str,
+        props: ModelProps,
+        options: ProxyOptions,
+        registration_options: RegistrationOptions | None,
+    ) -> RegistrationId:
+        """Register systemone (decision model) for given model as a proxy."""
+
+        async def on_request(body: SystemOneRequest, request: Request | None) -> StreamingResponse:
+            return await post_json(body, options, request, timeout=self._proxy_timeout)
+
+        return self.register_systemone(model, props, SimpleEndpoint(on_request=on_request), registration_options)
+
+    def unregister_systemone(self, model: str, registration_id: RegistrationId) -> None:
+        """Unregister systemone (decision model) for given model."""
+        self.systemone_endpoints.remove_model(model, registration_id)
 
     def register_custom_endpoint(
         self,
@@ -1341,7 +1376,7 @@ class EndpointRegistry:
             options.forward_full_path = True
             self.register_mcp_endpoint_as_proxy(url=model_id, props=props, options=options, registration_options=registration_options)
 
-    def _register_proxy(
+    def _register_proxy(  # noqa: C901
         self,
         model_id: ModelId,
         type: str,
@@ -1415,6 +1450,16 @@ class EndpointRegistry:
                 props=props,
                 options=ProxyOptions(
                     url=urljoin(url, "v1/rerank"),
+                    headers={"Authorization": f"Bearer {api_key}"},
+                ),
+                registration_options=registration_options,
+            )
+        elif type == "decision":
+            self.register_systemone_as_proxy(
+                model=model_id,
+                props=props,
+                options=ProxyOptions(
+                    url=urljoin(url, "v1/systemone"),
                     headers={"Authorization": f"Bearer {api_key}"},
                 ),
                 registration_options=registration_options,
@@ -1727,6 +1772,26 @@ class EndpointRegistry:
         if self.config.is_log_payloads_enabled():
             logger.info(f"DUMP REQUEST PAYLOAD /v1/rerank {body.model_dump_json(exclude_none=True)}")
         endpoint = self.rerank_endpoints.get_model(body.model, registration_id=registration_id)
+        if not endpoint:
+            if not self.model_exists(body.model):
+                raise HTTPException(404, "Model not found")
+            raise HTTPException(400, "Given model is not supported")
+
+        async def func() -> StarletteResponse:
+            return await endpoint.endpoint.on_request(body, request)
+
+        return await self.with_usage(endpoint, func)
+
+    async def execute_systemone(
+        self,
+        body: SystemOneRequest,
+        request: Request | None = None,
+        registration_id: RegistrationId | None = None,
+    ) -> StarletteResponse:
+        """Process systemone (decision model) request."""
+        if self.config.is_log_payloads_enabled():
+            logger.info(f"DUMP REQUEST PAYLOAD /v1/systemone {body.model_dump_json(exclude_none=True)}")
+        endpoint = self.systemone_endpoints.get_model(body.model, registration_id=registration_id)
         if not endpoint:
             if not self.model_exists(body.model):
                 raise HTTPException(404, "Model not found")

@@ -30,6 +30,7 @@ from server.models.api import (
     MessagesRequest,
     RerankRequest,
     ResponsesRequest,
+    SystemOneRequest,
     ThinkingConfigDisabled,
     UserMessage,
 )
@@ -138,6 +139,8 @@ class ModelTester:
             return await self._test_txt2img(entry.registered_model.name, entry.registered_model.endpoint)
         if entry.registered_model.type == "rerank":
             return await self._test_rerank(entry.registered_model.name, entry.registered_model.endpoint)
+        if entry.registered_model.type == "decision":
+            return await self._test_systemone(entry.registered_model.name, entry.registered_model.endpoint)
         if entry.registered_model.type == "mcp":
             return await self._test_mcp(entry.registered_model.name, entry.registered_model.endpoint)
         if entry.registered_model.type == "custom":
@@ -437,6 +440,38 @@ class ModelTester:
                 "output": {"tools": tools, "server_info": server_info},
                 "details": {"initialize": init_data, "tools_list": tools_data},
             }
+
+    async def _test_systemone(self, model: str, endpoint: SimpleEndpoint[SystemOneRequest]) -> JsonSerializable:
+        (my_resp, json) = await self._read_json(
+            await endpoint.on_request(
+                SystemOneRequest.model_validate(
+                    {
+                        "model": model,
+                        "state": "Our checkout has returned 500 errors since 9am.",
+                        "questions": {
+                            "label": {
+                                "type": "choice",
+                                "instructions": "Which label fits this ticket?",
+                                "criteria": {
+                                    "billing": "Payments and refunds",
+                                    "bug": "Software errors",
+                                    "account": "Login and account access",
+                                },
+                            }
+                        },
+                    }
+                ),
+                None,
+            )
+        )
+        try:
+            return {
+                "result": "ok",
+                "output": json["answers"]["label"]["choice"],
+                "details": json,
+            }
+        except Exception:
+            raise ModelTestError("Cannot read decision answer", my_resp)  # noqa: B904
 
     async def _read_json(self, response: StarletteResponse) -> tuple[Response, Any]:
         my_resp = await self._read_response(response)

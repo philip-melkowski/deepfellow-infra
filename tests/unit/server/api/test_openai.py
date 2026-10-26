@@ -40,6 +40,7 @@ def registry() -> MagicMock:
     mock.execute_audio_transcriptions = AsyncMock(return_value=JSONResponse({"ok": True}))
     mock.execute_images_generations = AsyncMock(return_value=JSONResponse({"ok": True}))
     mock.execute_rerank = AsyncMock(return_value=JSONResponse({"ok": True}))
+    mock.execute_systemone = AsyncMock(return_value=JSONResponse({"ok": True}))
     mock.execute_custom_endpoints = AsyncMock(return_value=JSONResponse({"ok": True}))
     mock.execute_mcp_endpoints = AsyncMock(return_value=JSONResponse({"ok": True}))
     return mock
@@ -493,6 +494,65 @@ def test_post_rerank_passes_model_to_registry(registry: MagicMock, client: TestC
     client.post("/v1/rerank", json=RERANK_BODY, headers=auth_header)
 
     assert registry.execute_rerank.call_args.args[0].model == "rnk-model"
+
+
+SYSTEMONE_BODY = {
+    "model": "tev1:0.8b",
+    "state": "Our checkout has returned 500 errors since 9am.",
+    "questions": {"label": {"type": "choice", "instructions": "Which label?", "criteria": {"bug": None, "billing": None}}},
+}
+
+
+def test_post_systemone_delegates_to_registry(registry: MagicMock, client: TestClient, auth_header: dict[str, str]) -> None:
+    resp = client.post("/v1/systemone", json=SYSTEMONE_BODY, headers=auth_header)
+
+    assert resp.status_code == 200
+    assert registry.execute_systemone.call_count == 1
+
+
+def test_post_systemone_passes_model_to_registry(registry: MagicMock, client: TestClient, auth_header: dict[str, str]) -> None:
+    client.post("/v1/systemone", json=SYSTEMONE_BODY, headers=auth_header)
+
+    assert registry.execute_systemone.call_args.args[0].model == "tev1:0.8b"
+
+
+def test_post_systemone_without_questions_is_rejected(registry: MagicMock, client: TestClient, auth_header: dict[str, str]) -> None:
+    resp = client.post("/v1/systemone", json={"model": "tev1:0.8b", "state": "x"}, headers=auth_header)
+
+    assert resp.status_code == 400
+    assert registry.execute_systemone.call_count == 0
+
+
+def test_post_systemone_accepts_null_state_and_question_without_instructions(
+    registry: MagicMock, client: TestClient, auth_header: dict[str, str]
+) -> None:
+    resp = client.post(
+        "/v1/systemone", json={"model": "tev1:0.8b", "state": None, "questions": {"urgent": {"type": "noul"}}}, headers=auth_header
+    )
+
+    assert resp.status_code == 200
+    body = registry.execute_systemone.call_args.args[0]
+    assert body.state is None
+    assert body.questions["urgent"].instructions is None
+
+
+def test_post_systemone_returns_backend_error_unchanged(registry: MagicMock, client: TestClient, auth_header: dict[str, str]) -> None:
+    registry.execute_systemone.return_value = JSONResponse({"error": "too many questions"}, status_code=400)
+
+    resp = client.post("/v1/systemone", json=SYSTEMONE_BODY, headers=auth_header)
+
+    assert resp.status_code == 400
+    assert resp.json() == {"error": "too many questions"}
+
+
+def test_post_systemone_requires_auth() -> None:
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.include_router(router)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        resp = client.post("/v1/systemone", json=SYSTEMONE_BODY)
+
+    assert resp.status_code in (401, 403)
 
 
 def test_get_custom_returns_prefix_list(registry: MagicMock, client: TestClient, auth_header: dict[str, str]) -> None:

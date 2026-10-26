@@ -31,6 +31,7 @@ from server.services.ollama_service import (
     OllamaOptions,
     OllamaService,
     _const,  # pyright: ignore[reportPrivateUsage]
+    _read_models,  # pyright: ignore[reportPrivateUsage]
 )
 from server.utils.core import (
     CommandFailedError,
@@ -3535,6 +3536,7 @@ async def test_download_with_ollama_interleaved_digests_correct_total(svc: Ollam
         ("embedding", "register_embeddings_as_proxy"),
         ("llm", "register_chat_completion_as_proxy"),
         ("txt2img", "register_image_generations_as_proxy"),
+        ("decision", "register_systemone_as_proxy"),
     ],
 )
 async def test_install_model_context_window_capped_by_model_context_when_service_exceeds_it(
@@ -3848,3 +3850,200 @@ def test_ollama_model_accepts_gguf_and_safetensors_quantization(quantization: st
 def test_newest_tag_in_the_real_docker_hub_list(svc: OllamaService, installed: str, expected: str) -> None:
     tags = svc.filter_docker_tags(real_tags("ollama"), "GPU")
     assert newest_docker_tag(tags, installed) == expected
+
+
+def _write_ollama_catalog(tmp_path: Path, catalog: dict[str, Any]) -> None:
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    (static_dir / "ollama-min.json").write_text(json.dumps(catalog), encoding="utf-8")
+
+
+@patch("server.services.ollama_service.get_main_dir")
+def test_read_models_loads_decision_category(mock_get_main_dir: MagicMock, tmp_path: Path) -> None:
+    entry = {"name": "tev1:0.8b", "size": "834MB", "hash": "cb16f3186b07", "context": 262144}
+    _write_ollama_catalog(tmp_path, {"llms": [], "embeddings": [], "txt2img": [], "decision": [entry]})
+    mock_get_main_dir.return_value = tmp_path
+
+    models = _read_models()
+
+    assert models["tev1:0.8b"].type == "decision"
+    assert models["tev1:0.8b"].context == 262144
+
+
+@patch("server.services.ollama_service.get_main_dir")
+def test_read_models_accepts_catalog_without_decision_category(mock_get_main_dir: MagicMock, tmp_path: Path) -> None:
+    entry = {"name": "llama3.2", "size": "2GB", "hash": "abc", "context": 131072}
+    _write_ollama_catalog(tmp_path, {"llms": [entry], "embeddings": [], "txt2img": []})
+    mock_get_main_dir.return_value = tmp_path
+
+    models = _read_models()
+
+    assert {model_id: model.type for model_id, model in models.items()} == {"llama3.2": "llm"}
+
+
+@pytest.mark.parametrize("model_id", ["nimble", "nimble:9b", "tev1", "tev1:0.8b", "clef"])
+def test_read_models_types_bundled_decision_models_as_decision(model_id: str) -> None:
+    assert _const.models[model_id].type == "decision"
+
+
+def _make_decision_installed_info(model_id: str = "tev1:0.8b") -> ModelInstalledInfo:
+    return ModelInstalledInfo(
+        id=model_id,
+        registered_name=model_id,
+        type="decision",
+        options=InstallModelIn(spec={}),
+        registration_id="reg-dec",
+        internal_name=None,
+    )
+
+
+@pytest.mark.asyncio
+@patch("server.services.ollama_service.fetch_from", new_callable=AsyncMock)
+async def test_install_model_registers_decision_model_only_under_systemone(
+    mock_fetch_from: AsyncMock, svc: OllamaService, deps: dict[str, Any]
+) -> None:
+    installed = _make_installed_info(svc)
+    svc.instances_info["default"].installed = installed
+    svc.models["default"]["tev1:0.8b"] = OllamaModel(id="tev1:0.8b", size="834MB", type="decision", hash="cb16", context=262144)
+    mock_fetch_from.return_value = FetchResult(status_code=200, data="")
+
+    promise = await svc._install_model("default", "tev1:0.8b", InstallModelIn(spec={}))  # pyright: ignore[reportPrivateUsage]
+    await promise.wait()
+
+    registry = deps["endpoint_registry"]
+    assert registry.register_systemone_as_proxy.call_count == 1
+    kwargs = registry.register_systemone_as_proxy.call_args.kwargs
+    assert kwargs["model"] == "tev1:0.8b"
+    assert kwargs["props"].type == "decision"
+    assert kwargs["props"].endpoints == ["/v1/systemone"]
+    assert kwargs["options"].url == f"{installed.base_url}/v1/systemone"
+    assert kwargs["options"].rewrite_model_to == "tev1:0.8b"
+    assert registry.register_chat_completion_as_proxy.call_count == 0
+    assert registry.register_embeddings_as_proxy.call_count == 0
+    assert installed.models["tev1:0.8b"].type == "decision"
+
+
+@pytest.mark.asyncio
+@patch("server.services.ollama_service.fetch_from", new_callable=AsyncMock)
+async def test_load_model_registers_model_persisted_as_llm_under_systemone_when_catalog_says_decision(
+    mock_fetch_from: AsyncMock, svc: OllamaService, deps: dict[str, Any]
+) -> None:
+    installed = _make_installed_info(svc)
+    svc.instances_info["default"].installed = installed
+    mock_fetch_from.return_value = FetchResult(status_code=200, data="")
+    config = ModelConfig(
+        model_id="tev1:0.8b",
+        options=InstallModelIn(spec={}),
+        definition={"id": "tev1:0.8b", "size": "834MB", "type": "llm", "hash": "cb16f3186b07", "context": 262144},
+    )
+
+    await svc.load_model("default", config)
+
+    registry = deps["endpoint_registry"]
+    assert "tev1:0.8b" not in svc._failed_models.get("default", set())  # pyright: ignore[reportPrivateUsage]
+    assert registry.register_systemone_as_proxy.call_count == 1
+    assert registry.register_systemone_as_proxy.call_args.kwargs["model"] == "tev1:0.8b"
+    assert registry.register_chat_completion_as_proxy.call_count == 0
+    assert installed.models["tev1:0.8b"].type == "decision"
+
+
+@pytest.mark.asyncio
+@patch.object(OllamaService, "_get_ollama_version", new_callable=AsyncMock, return_value="0.34.1")
+@patch("server.services.ollama_service.fetch_from", new_callable=AsyncMock)
+async def test_install_model_rejects_decision_model_on_ollama_older_than_0_35(
+    mock_fetch_from: AsyncMock, mock_get_ollama_version: AsyncMock, svc: OllamaService, deps: dict[str, Any]
+) -> None:
+    installed = _make_installed_info(svc)
+    svc.instances_info["default"].installed = installed
+    svc.models["default"]["tev1:0.8b"] = OllamaModel(id="tev1:0.8b", size="834MB", type="decision", hash="cb16", context=262144)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await svc._install_model("default", "tev1:0.8b", InstallModelIn(spec={}))  # pyright: ignore[reportPrivateUsage]
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Decision models need Ollama 0.35.0 or newer; this Ollama is 0.34.1."
+    assert mock_get_ollama_version.call_args == call(installed.base_url)
+    assert mock_fetch_from.call_count == 0
+    assert ("default", "tev1:0.8b") not in svc._installing  # pyright: ignore[reportPrivateUsage]
+    assert deps["endpoint_registry"].register_systemone_as_proxy.call_count == 0
+
+
+@pytest.mark.asyncio
+@patch("server.services.ollama_service.fetch_from", new_callable=AsyncMock)
+async def test_install_model_post_registration_failure_unregisters_decision_and_rolls_back(
+    mock_fetch_from: AsyncMock, svc: OllamaService, deps: dict[str, Any]
+) -> None:
+    installed = _make_installed_info(svc)
+    svc.instances_info["default"].installed = installed
+    model_id = "tev1:0.8b"
+    svc.models["default"][model_id] = OllamaModel(id=model_id, size="834MB", type="decision", hash="cb16", context=None, modelfile=None)
+    deps["endpoint_registry"].register_systemone_as_proxy.return_value = "reg-dec"
+    svc.models_downloaded = MagicMock()  # pyright: ignore[reportAttributeAccessIssue]
+    svc.models_downloaded.__setitem__ = MagicMock(side_effect=RuntimeError("storage failed"))
+    mock_fetch_from.return_value = FetchResult(status_code=200, data="")
+
+    promise = await svc._install_model("default", model_id, InstallModelIn(spec={}))  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(RuntimeError):
+        await promise.wait()
+
+    assert model_id not in installed.models
+    assert deps["endpoint_registry"].unregister_systemone.call_count == 1
+    assert deps["endpoint_registry"].unregister_systemone.call_args == call(model_id, "reg-dec")
+
+
+@pytest.mark.asyncio
+@patch("server.services.ollama_service.fetch_from", new_callable=AsyncMock)
+async def test_uninstall_model_unregisters_decision_endpoint(mock_fetch_from: AsyncMock, svc: OllamaService, deps: dict[str, Any]) -> None:
+    installed = _make_installed_info(svc)
+    installed.models["tev1:0.8b"] = _make_decision_installed_info()
+    svc.instances_info["default"].installed = installed
+    svc.models["default"]["tev1:0.8b"] = OllamaModel(id="tev1:0.8b", size="834MB", type="decision", hash="cb16", context=None)
+    mock_fetch_from.return_value = FetchResult(status_code=200, data="")
+
+    await svc._uninstall_model("default", "tev1:0.8b", UninstallModelIn(purge=False))  # pyright: ignore[reportPrivateUsage]
+
+    assert deps["endpoint_registry"].unregister_systemone.call_count == 1
+    assert deps["endpoint_registry"].unregister_systemone.call_args == call("tev1:0.8b", "reg-dec")
+    assert deps["endpoint_registry"].unregister_chat_completion.call_count == 0
+
+
+@pytest.mark.asyncio
+@patch.object(OllamaService, "_uninstall_model", new_callable=AsyncMock)
+async def test_uninstall_instance_unregisters_decision_model(
+    mock_uninstall_model: AsyncMock, svc: OllamaService, deps: dict[str, Any]
+) -> None:
+    installed = _make_installed_info(svc)
+    installed.models["tev1:0.8b"] = _make_decision_installed_info()
+    svc.instances_info["default"].installed = installed
+    deps["docker_service"].uninstall_docker = AsyncMock()
+
+    await svc._uninstall_instance("default", UninstallServiceIn(purge=False))  # pyright: ignore[reportPrivateUsage]
+
+    assert deps["endpoint_registry"].unregister_systemone.call_count == 1
+    assert deps["endpoint_registry"].unregister_systemone.call_args == call("tev1:0.8b", "reg-dec")
+    assert mock_uninstall_model.call_count == 1
+
+
+def test_get_custom_model_spec_offers_decision_type(svc: OllamaService) -> None:
+    spec = svc.get_custom_model_spec()
+
+    assert spec is not None
+    type_field = next(field for field in spec.fields if field.name == "type")
+    assert "decision" in (type_field.values or [])
+
+
+@pytest.mark.asyncio
+@patch("server.services.ollama_service.fetch_from", new_callable=AsyncMock)
+async def test_install_model_registers_custom_decision_model_under_systemone(
+    mock_fetch_from: AsyncMock, svc: OllamaService, deps: dict[str, Any]
+) -> None:
+    svc._add_custom_model("default", CustomModel(id="c-dec", data={"id": "my-decider", "size": "1GB", "type": "decision"}))  # pyright: ignore[reportPrivateUsage]
+    svc.instances_info["default"].installed = _make_installed_info(svc)
+    mock_fetch_from.return_value = FetchResult(status_code=200, data="")
+
+    promise = await svc._install_model("default", "my-decider", InstallModelIn(spec={}))  # pyright: ignore[reportPrivateUsage]
+    await promise.wait()
+
+    assert svc.models["default"]["my-decider"].type == "decision"
+    assert deps["endpoint_registry"].register_systemone_as_proxy.call_count == 1
+    assert deps["endpoint_registry"].register_systemone_as_proxy.call_args.kwargs["model"] == "my-decider"

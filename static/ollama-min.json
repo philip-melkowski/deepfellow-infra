@@ -459,30 +459,6 @@
             "context": 262144
         },
         {
-            "name": "clef",
-            "size": "",
-            "hash": "fdd5939e1bd9",
-            "context": 262144
-        },
-        {
-            "name": "clef-flash",
-            "size": "",
-            "hash": "8f7e6863135c",
-            "context": 262144
-        },
-        {
-            "name": "clef-flash:9b",
-            "size": "",
-            "hash": "8f7e6863135c",
-            "context": 262144
-        },
-        {
-            "name": "clef:27b",
-            "size": "",
-            "hash": "fdd5939e1bd9",
-            "context": 262144
-        },
-        {
             "name": "codebooga",
             "size": "19GB",
             "hash": "05b83c5673dc",
@@ -2909,30 +2885,6 @@
             "context": 16384
         },
         {
-            "name": "nimble",
-            "size": "",
-            "hash": "5745f025fbe6",
-            "context": 262144
-        },
-        {
-            "name": "nimble-v3",
-            "size": "",
-            "hash": "4f30b1db22d3",
-            "context": 32768
-        },
-        {
-            "name": "nimble-v3:9b",
-            "size": "",
-            "hash": "4f30b1db22d3",
-            "context": 32768
-        },
-        {
-            "name": "nimble:9b",
-            "size": "",
-            "hash": "5745f025fbe6",
-            "context": 262144
-        },
-        {
             "name": "north-mini-code-1.0",
             "size": "19GB",
             "hash": "d8b269ad5c7c",
@@ -4417,24 +4369,6 @@
             "context": 4096
         },
         {
-            "name": "tev1",
-            "size": "",
-            "hash": "3ea3be2f2026",
-            "context": 262144
-        },
-        {
-            "name": "tev1:0.8b",
-            "size": "",
-            "hash": "cb16f3186b07",
-            "context": 262144
-        },
-        {
-            "name": "tev1:4b",
-            "size": "",
-            "hash": "3ea3be2f2026",
-            "context": 262144
-        },
-        {
             "name": "tinydolphin",
             "size": "637MB",
             "hash": "0f9dd11f824c",
@@ -4801,6 +4735,74 @@
             "size": "13GB",
             "hash": "",
             "context": null
+        }
+    ],
+    "decision": [
+        {
+            "name": "clef",
+            "size": "",
+            "hash": "fdd5939e1bd9",
+            "context": 262144
+        },
+        {
+            "name": "clef-flash",
+            "size": "",
+            "hash": "8f7e6863135c",
+            "context": 262144
+        },
+        {
+            "name": "clef-flash:9b",
+            "size": "",
+            "hash": "8f7e6863135c",
+            "context": 262144
+        },
+        {
+            "name": "clef:27b",
+            "size": "",
+            "hash": "fdd5939e1bd9",
+            "context": 262144
+        },
+        {
+            "name": "nimble",
+            "size": "",
+            "hash": "5745f025fbe6",
+            "context": 262144
+        },
+        {
+            "name": "nimble-v3",
+            "size": "",
+            "hash": "4f30b1db22d3",
+            "context": 32768
+        },
+        {
+            "name": "nimble-v3:9b",
+            "size": "",
+            "hash": "4f30b1db22d3",
+            "context": 32768
+        },
+        {
+            "name": "nimble:9b",
+            "size": "",
+            "hash": "5745f025fbe6",
+            "context": 262144
+        },
+        {
+            "name": "tev1",
+            "size": "",
+            "hash": "3ea3be2f2026",
+            "context": 262144
+        },
+        {
+            "name": "tev1:0.8b",
+            "size": "",
+            "hash": "cb16f3186b07",
+            "context": 262144
+        },
+        {
+            "name": "tev1:4b",
+            "size": "",
+            "hash": "3ea3be2f2026",
+            "context": 262144
         }
     ]
 }

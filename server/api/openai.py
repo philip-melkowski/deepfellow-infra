@@ -27,6 +27,8 @@ from server.models.api import (
     RerankRequest,
     ResponsesRequest,
     ResponsesResponse,
+    SystemOneRequest,
+    SystemOneResponse,
 )
 from server.models.common import StarletteResponse
 from server.utils.request_limits import apply_default_generation_limits, enforce_generation_limits
@@ -189,6 +191,17 @@ async def on_rerank(
 ) -> StarletteResponse:
     """Process rerank request."""
     return await endpoint_registry.execute_rerank(body, request)
+
+
+@router.post("/v1/systemone")
+async def on_systemone(
+    request: Request,
+    body: Annotated[SystemOneRequest, Body(...)],
+    _: Annotated[str, Depends(auth_server)],
+    endpoint_registry: Annotated[EndpointRegistry, Depends(get_endpoint_registry)],
+) -> SystemOneResponse | StarletteResponse:
+    """Answer typed choice, yes/no (noul) and score questions with a decision model."""
+    return await endpoint_registry.execute_systemone(body, request)
 
 
 @router.get("/custom")

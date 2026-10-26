@@ -12,7 +12,7 @@ from uuid import uuid4
 from aiohttp import FormData
 from fastapi import File as FastApiFile
 from fastapi import UploadFile
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
 from server.utils.logger import logger
 
@@ -29,6 +29,7 @@ EMBEDDINGS_ENDPOINTS = ["/v1/embeddings"]
 STT_ENDPOINTS = ["/v1/audio/transcriptions"]
 TTS_ENDPOINTS = ["/v1/audio/speech"]
 IMG_ENDPOINTS = ["/v1/images/generations"]
+DECISION_ENDPOINTS = ["/v1/systemone"]
 
 # Caps on the flat dict fields (`chat_template_kwargs`, `repetition_detection`). They are precautionary, not derived from any backend.
 # Numeric bounds on the extra sampling fields follow the OpenAI/vLLM specs; `thinking_token_budget` and `top_k` have no upper bound
@@ -532,7 +533,7 @@ class ModelProps(BaseModel):
     supports_audio: bool | None = None
 
 
-type ModelType = Literal["llm", "embedding", "tts", "stt", "rerank", "txt2img", "mcp", "custom"]
+type ModelType = Literal["llm", "embedding", "tts", "stt", "rerank", "txt2img", "decision", "mcp", "custom"]
 
 type ModelId = str
 type RegistrationId = str
@@ -2462,3 +2463,91 @@ class RerankResponse(BaseModel):
     id: str | None = None
     results: list[RerankResultItem]
     meta: dict[str, Any] | None = None
+
+
+SystemOneText = str | dict[str, Any] | list[Any]
+
+
+class SystemOneChoiceQuestion(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    type: Literal["choice"]
+    instructions: SystemOneText | None = None
+    criteria: dict[str, str | None]
+
+
+class SystemOneNoulQuestion(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    type: Literal["noul"]
+    instructions: SystemOneText | None = None
+    criteria: dict[str, str] | None = None
+
+
+class SystemOneScoreQuestion(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    type: Literal["score"]
+    instructions: SystemOneText | None = None
+    criteria: list[str]
+
+
+SystemOneQuestion = Annotated[SystemOneChoiceQuestion | SystemOneNoulQuestion | SystemOneScoreQuestion, Field(discriminator="type")]
+
+
+class SystemOneRequest(BaseModel):
+    """Request for the decision-model endpoint `POST /v1/systemone` (Ollama >= 0.35.0, vLLM >= 0.32.0).
+
+    Limits such as question count, option count, score levels or request size are model- and version-dependent, so they
+    are left to the backend, which rejects violations with a 400 that is passed through unchanged. Question
+    `instructions` are optional and `state` may be `null`, as vLLM allows; Ollama rejects both with a 400.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    model: str
+    state: SystemOneText | None
+    questions: dict[str, SystemOneQuestion]
+    images: list[str] | None = None
+    keep_alive: str | int | float | None = None
+
+    @model_serializer(mode="wrap")
+    def _keep_null_state(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Keep `state` in the dump even when it is `null`, since backends require the field and proxying drops `None`s."""
+        data: dict[str, Any] = handler(self)
+        data.setdefault("state", None)
+        return data
+
+
+class SystemOneChoiceAnswer(BaseModel):
+    type: Literal["choice"]
+    choice: str
+    probabilities: dict[str, float]
+    confidence: float
+
+
+class SystemOneNoulAnswer(BaseModel):
+    type: Literal["noul"]
+    noul: float
+
+
+class SystemOneScoreAnswer(BaseModel):
+    type: Literal["score"]
+    score: float
+    legend: dict[str, str]
+    probabilities: dict[str, float]
+    confidence: float
+
+
+SystemOneAnswer = Annotated[SystemOneChoiceAnswer | SystemOneNoulAnswer | SystemOneScoreAnswer, Field(discriminator="type")]
+
+
+class SystemOneUsage(BaseModel):
+    input_tokens: int
+    output_tokens: int
+
+
+class SystemOneResponse(BaseModel):
+    model: str
+    answers: dict[str, SystemOneAnswer]
+    usage: SystemOneUsage

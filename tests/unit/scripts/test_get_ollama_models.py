@@ -176,8 +176,10 @@ def test_deduplicate_by_hash_prefers_shorter(entries: list[ModelEntry], kept: st
         (["txt2img"], "txt2img"),
         (["vision", "tools"], "llms"),
         ([], "llms"),
+        (["tools", "decision", "thinking"], "decision"),
+        (["Decision"], "decision"),
     ],
-    ids=["embedding", "image_generation", "text_to_image", "txt2img", "vision_tools_llms", "empty_llms"],
+    ids=["embedding", "image_generation", "text_to_image", "txt2img", "vision_tools_llms", "empty_llms", "decision_tools", "decision_only"],
 )
 def test_capability_to_category(caps: list[str], expected: str) -> None:
     assert capability_to_category(caps) == expected
@@ -699,7 +701,7 @@ async def test_build_min_json_returns_categorized_output() -> None:
     ):
         result = await build_min_json(use_cache=False, concurrency=2, extra_specs=extra_specs)
 
-    assert set(result.keys()) == {"embeddings", "llms", "txt2img"}
+    assert set(result.keys()) == {"embeddings", "llms", "txt2img", "decision"}
 
 
 @pytest.mark.asyncio
@@ -737,6 +739,22 @@ async def test_build_min_json_extra_specs_models_included() -> None:
 
 
 @pytest.mark.asyncio
+@patch("scripts.get_ollama_models.fetch_model_tags", new_callable=AsyncMock)
+@patch("scripts.get_ollama_models.fetch_cached", new_callable=AsyncMock)
+async def test_build_min_json_puts_decision_models_in_decision_category(
+    mock_fetch_cached: AsyncMock, mock_fetch_model_tags: AsyncMock
+) -> None:
+    extra_specs: ExtraSpec = {"extra": {"embeddings": [], "llms": [], "txt2img": []}, "pickTags": {}}
+    mock_fetch_cached.return_value = _LIBRARY_HTML
+    mock_fetch_model_tags.return_value = ("decision", "tev1", [{"name": "tev1", "size": "", "hash": "h", "context": None}])
+
+    result = await build_min_json(use_cache=False, concurrency=2, extra_specs=extra_specs)
+
+    assert result["decision"]
+    assert result["llms"] == []
+
+
+@pytest.mark.asyncio
 async def test_main_clear_cache_existing_dir(tmp_path: Path) -> None:
     cache = tmp_path / "ollama"
     cache.mkdir()
@@ -766,7 +784,7 @@ async def test_main_normal_run_writes_output(tmp_path: Path) -> None:
     output = tmp_path / "out.json"
 
     async def fake_build(use_cache: bool, concurrency: int, extra_specs: ExtraSpec) -> MinJson:
-        return {"embeddings": [], "llms": [], "txt2img": []}
+        return {"embeddings": [], "llms": [], "txt2img": [], "decision": []}
 
     with (
         patch(
@@ -778,7 +796,7 @@ async def test_main_normal_run_writes_output(tmp_path: Path) -> None:
         await main()
 
     assert output.exists()
-    assert set(json.loads(output.read_text()).keys()) == {"embeddings", "llms", "txt2img"}
+    assert set(json.loads(output.read_text()).keys()) == {"embeddings", "llms", "txt2img", "decision"}
 
 
 @pytest.mark.asyncio
@@ -794,7 +812,7 @@ async def test_main_extra_file_loaded(tmp_path: Path) -> None:
 
     async def fake_build(use_cache: bool, concurrency: int, extra_specs: ExtraSpec) -> MinJson:
         captured.append(extra_specs)
-        return {"embeddings": [], "llms": [], "txt2img": []}
+        return {"embeddings": [], "llms": [], "txt2img": [], "decision": []}
 
     with (
         patch(
@@ -818,7 +836,7 @@ async def test_main_merge_file_appended(tmp_path: Path) -> None:
     )
 
     async def fake_build(use_cache: bool, concurrency: int, extra_specs: ExtraSpec) -> MinJson:
-        return {"embeddings": [], "llms": [], "txt2img": []}
+        return {"embeddings": [], "llms": [], "txt2img": [], "decision": []}
 
     with (
         patch(
@@ -834,6 +852,27 @@ async def test_main_merge_file_appended(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@patch("scripts.get_ollama_models.build_min_json", new_callable=AsyncMock)
+async def test_main_merge_file_appends_decision_entries(
+    mock_build_min_json: AsyncMock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "out.json"
+    merge_file = tmp_path / "merge.json"
+    merge_file.write_text(
+        json.dumps({"decision": [{"name": "my-decider", "size": "1 GB", "hash": "xyz", "context": None}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "sys.argv", ["script", "--output", str(output), "--extra", str(tmp_path / "no_extra.json"), "--merge", str(merge_file)]
+    )
+    mock_build_min_json.return_value = {"embeddings": [], "llms": [], "txt2img": [], "decision": []}
+
+    await main()
+
+    assert [e["name"] for e in json.loads(output.read_text())["decision"]] == ["my-decider"]
+
+
+@pytest.mark.asyncio
 async def test_main_output_sorted_by_name(tmp_path: Path) -> None:
     output = tmp_path / "out.json"
 
@@ -845,6 +884,7 @@ async def test_main_output_sorted_by_name(tmp_path: Path) -> None:
                 {"name": "amodel", "size": "", "hash": "", "context": None},
             ],
             "txt2img": [],
+            "decision": [],
         }
 
     with (

@@ -85,3 +85,19 @@ def supports_gguf_quantization(ollama_version: str) -> bool | None:
         return version.parse(ollama_version) < _GGUF_QUANTIZATION_REMOVED_IN
     except version.InvalidVersion:
         return None
+
+
+_DECISION_MODELS_ADDED_IN = version.parse("0.35.0")
+
+
+def decision_models_unsupported_message(ollama_version: str) -> str:
+    """Return the user-facing error for a decision model on an Ollama too old to serve `/v1/systemone`."""
+    return f"Decision models need Ollama {_DECISION_MODELS_ADDED_IN} or newer; this Ollama is {ollama_version}."
+
+
+def supports_decision_models(ollama_version: str) -> bool | None:
+    """Return whether this Ollama version serves decision models on `/v1/systemone`, or None if the version can't be parsed."""
+    try:
+        return version.parse(ollama_version) >= _DECISION_MODELS_ADDED_IN
+    except version.InvalidVersion:
+        return None

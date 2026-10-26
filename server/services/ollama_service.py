@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Literal, NamedTuple, TypedDict
+from typing import Annotated, Any, Literal, NamedTuple, NotRequired, TypedDict
 from urllib.parse import urlparse
 
 import aiofiles
@@ -24,7 +24,7 @@ from server.applicationcontext import get_base_url
 from server.config import get_main_dir
 from server.docker import DockerImage, DockerOptions, DockerPath
 from server.endpointregistry import ProxyOptions, RegistrationId, RegistrationOptions
-from server.models.api import EMBEDDINGS_ENDPOINTS, IMG_ENDPOINTS, LLM_ENDPOINTS, ModelProps
+from server.models.api import DECISION_ENDPOINTS, EMBEDDINGS_ENDPOINTS, IMG_ENDPOINTS, LLM_ENDPOINTS, ModelProps
 from server.models.models import (
     CustomModelField,
     CustomModelId,
@@ -69,8 +69,10 @@ from server.utils.loading import Progress
 from server.utils.logger import logger
 from server.utils.ollama import (
     GGUF_QUANTIZATION_UNSUPPORTED_MESSAGE,
+    decision_models_unsupported_message,
     get_ollama_create_error_message,
     raise_ollama_pull_error,
+    supports_decision_models,
     supports_gguf_quantization,
 )
 from server.utils.ollama_catalog import OllamaCatalogClient
@@ -135,7 +137,7 @@ class OllamaModel(BaseModel):
 class OllamaCustomModel(BaseModel):
     id: str
     size: str
-    type: Literal["llm", "embedding"]
+    type: Literal["llm", "embedding", "decision"]
     modelfile: str | None = None
     quantization: Quantization | Literal[""] | None = None
 
@@ -151,6 +153,7 @@ class OllamaRegistry(TypedDict):
     llms: list[OllamaRegistryEntry]
     embeddings: list[OllamaRegistryEntry]
     txt2img: list[OllamaRegistryEntry]
+    decision: NotRequired[list[OllamaRegistryEntry]]
 
 
 def _read_models() -> dict[str, OllamaModel]:
@@ -184,6 +187,16 @@ def _read_models() -> dict[str, OllamaModel]:
                 id=tag["name"],
                 size=tag["size"],
                 type="txt2img",
+                modelfile=tag.get("modelfile", ""),
+                quantization=tag.get("quantization", ""),
+                hash=tag["hash"],
+                context=tag["context"],
+            )
+        for tag in registry.get("decision", []):
+            map[tag["name"]] = OllamaModel(
+                id=tag["name"],
+                size=tag["size"],
+                type="decision",
                 modelfile=tag.get("modelfile", ""),
                 quantization=tag.get("quantization", ""),
                 hash=tag["hash"],
@@ -479,7 +492,7 @@ class OllamaService(Base2Service[InstalledInfo, DownloadedInfo]):
         return CustomModelSpecification(
             fields=[
                 CustomModelField(type="text", name="id", description="Model ID", placeholder="my-custom-model"),
-                CustomModelField(type="oneof", name="type", description="Model type", values=["llm", "embedding", "txt2img"]),
+                CustomModelField(type="oneof", name="type", description="Model type", values=["llm", "embedding", "txt2img", "decision"]),
                 CustomModelField(
                     type="textarea",
                     name="modelfile",
@@ -718,6 +731,8 @@ class OllamaService(Base2Service[InstalledInfo, DownloadedInfo]):
                     self.endpoint_registry.unregister_embeddings(model.registered_name, model.registration_id)
                 if model.type == "txt2img":
                     self.endpoint_registry.unregister_image_generations(model.registered_name, model.registration_id)
+                if model.type == "decision":
+                    self.endpoint_registry.unregister_systemone(model.registered_name, model.registration_id)
 
             await asyncio.gather(
                 *[
@@ -1451,6 +1466,15 @@ class OllamaService(Base2Service[InstalledInfo, DownloadedInfo]):
         if ollama_version is not None and supports_gguf_quantization(ollama_version) is False:
             raise HTTPException(status_code=400, detail=GGUF_QUANTIZATION_UNSUPPORTED_MESSAGE)
 
+    async def _reject_ollama_without_decision_models(self, base_url: str) -> None:
+        """Raise a friendly 400 before any download if this Ollama is too old to serve decision models on `/v1/systemone`.
+
+        An unknown version is left to Ollama, as in the quantization pre-check.
+        """
+        ollama_version = await self._get_ollama_version(base_url)
+        if ollama_version is not None and supports_decision_models(ollama_version) is False:
+            raise HTTPException(status_code=400, detail=decision_models_unsupported_message(ollama_version))
+
     @staticmethod
     def _is_gguf_or_named_source(from_value: str) -> bool:
         """Return whether a FROM value is a GGUF file or a model name, i.e. anything but a (safetensors) directory or file."""
@@ -1504,8 +1528,11 @@ class OllamaService(Base2Service[InstalledInfo, DownloadedInfo]):
         if model_id not in self.models[instance]:
             raise HTTPException(400, f"Model {model_id!r} not found")
 
-        self._installing.add(key)
         model = self.models[instance][model_id]
+        if model.type == "decision":
+            await self._reject_ollama_without_decision_models(info.base_url)
+
+        self._installing.add(key)
 
         async def func(input_stream: Stream[StreamChunk]) -> InstallModelOut:  # noqa: C901
             try:
@@ -1647,6 +1674,23 @@ class OllamaService(Base2Service[InstalledInfo, DownloadedInfo]):
                                 origin="local", alias=registered_alias, owned_by=self.get_type(), capacity_state=capacity, warm=False
                             ),
                         )
+                    if model.type == "decision":
+                        model_info.registration_id = self.endpoint_registry.register_systemone_as_proxy(
+                            model=registered_name,
+                            props=ModelProps(
+                                private=True,
+                                type=model.type,
+                                endpoints=DECISION_ENDPOINTS,
+                                context_window=context_window,
+                                max_context_window=max_context_window,
+                                supports_vision=capabilities.supports_vision,
+                                supports_audio=capabilities.supports_audio,
+                            ),
+                            options=ProxyOptions(url=f"{info.base_url}/v1/systemone", rewrite_model_to=rewrite_model_to),
+                            registration_options=RegistrationOptions(
+                                origin="local", alias=registered_alias, owned_by=self.get_type(), capacity_state=capacity, warm=False
+                            ),
+                        )
                     input_stream.emit(StreamChunkProgress(type="progress", stage="install", value=1, data={}))
 
                     self.models_downloaded[model_id] = DownloadedInfo()
@@ -1665,6 +1709,8 @@ class OllamaService(Base2Service[InstalledInfo, DownloadedInfo]):
                             self.endpoint_registry.unregister_embeddings(model_info.registered_name, model_info.registration_id)
                         if model_info.type == "txt2img":
                             self.endpoint_registry.unregister_image_generations(model_info.registered_name, model_info.registration_id)
+                        if model_info.type == "decision":
+                            self.endpoint_registry.unregister_systemone(model_info.registered_name, model_info.registration_id)
                     if info.models.get(model_id) is model_info:
                         info.models.pop(model_id, None)
                     raise
@@ -1688,6 +1734,8 @@ class OllamaService(Base2Service[InstalledInfo, DownloadedInfo]):
                 self.endpoint_registry.unregister_embeddings(model.registered_name, model.registration_id)
             if model.type == "txt2img":
                 self.endpoint_registry.unregister_image_generations(model.registered_name, model.registration_id)
+            if model.type == "decision":
+                self.endpoint_registry.unregister_systemone(model.registered_name, model.registration_id)
             await self._unload_model_from_vram(model_id, ollama_name, info.base_url)
 
         # Cache entries are written under the resolved internal name (`ollama_name`), not
