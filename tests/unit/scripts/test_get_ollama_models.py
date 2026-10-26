@@ -6,7 +6,7 @@
 import asyncio
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import aiohttp
 import pytest
@@ -26,14 +26,18 @@ from scripts.get_ollama_models import (
     fetch_extra_model,
     fetch_model_tags,
     fetch_with_fallback,
+    fill_sizes_from_manifests,
     find_all_between,
+    format_size,
     guess_category,
     main,
+    manifest_url,
     parse_context,
     parse_library,
     parse_model_page,
     parse_tags_full,
     parse_tags_hashes,
+    size_from_manifest,
     skip_suffixes,
 )
 
@@ -358,6 +362,58 @@ def test_extract_size(raw: str, expected: str) -> None:
     assert extract_size(raw) == expected
 
 
+def test_extract_size_rejects_size_range() -> None:
+    assert extract_size("9.3GB - 9.5GB") == ""
+
+
+@pytest.mark.parametrize(
+    ("size", "expected"),
+    [
+        pytest.param(9_527_504_063, "9.5GB", id="one_decimal_below_ten"),
+        pytest.param(5_000_000_000, "5.0GB", id="keeps_trailing_zero"),
+        pytest.param(833_606_519, "834MB", id="whole_number_from_ten"),
+        pytest.param(18_000_000_000, "18GB", id="whole_gigabytes"),
+        pytest.param(999_600_000, "1.0GB", id="rounds_up_to_next_unit"),
+        pytest.param(9_960_000_000, "10GB", id="rounds_up_to_ten"),
+        pytest.param(512, "512B", id="bytes"),
+        pytest.param(2_500_000_000_000_000, "2500TB", id="largest_unit"),
+    ],
+)
+def test_format_size_matches_ollama_com_format(size: int, expected: str) -> None:
+    assert format_size(size) == expected
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        pytest.param("nimble", "https://registry.ollama.ai/v2/library/nimble/manifests/latest", id="no_tag"),
+        pytest.param("nimble:9b", "https://registry.ollama.ai/v2/library/nimble/manifests/9b", id="tag"),
+        pytest.param("myorg/mymodel:7b", "https://registry.ollama.ai/v2/myorg/mymodel/manifests/7b", id="namespace"),
+    ],
+)
+def test_manifest_url_builds_registry_path(name: str, expected: str) -> None:
+    assert manifest_url(name) == expected
+
+
+def _manifest(*layers: tuple[str, int]) -> str:
+    return json.dumps({"layers": [{"mediaType": f"application/vnd.ollama.image.{kind}", "size": size} for kind, size in layers]})
+
+
+def test_size_from_manifest_sums_all_layers() -> None:
+    assert size_from_manifest(_manifest(("model", 9_527_000_000), ("license", 400_000), ("params", 100_000))) == "9.5GB"
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        pytest.param(_manifest(("license", 400), ("params", 100)), id="no_model_layer"),
+        pytest.param(json.dumps({"schemaVersion": 2}), id="no_layers"),
+    ],
+)
+def test_size_from_manifest_without_model_layer_returns_empty(manifest: str) -> None:
+    assert size_from_manifest(manifest) == ""
+
+
 def test_parse_model_page_size_rejects_usage_slot_widget_markup() -> None:
     html = """
     <div class="group px-4 py-3">
@@ -549,6 +605,81 @@ def _fake_fetch_cached_tags_and_model(session: aiohttp.ClientSession, url: str, 
     return _SIMPLE_TAGS_HTML if "tags" in url else _SIMPLE_MODEL_HTML
 
 
+def _entry_with_size(name: str, size: str) -> ModelEntry:
+    return {"name": name, "size": size, "hash": "", "context": None}
+
+
+@pytest.mark.asyncio
+@patch("scripts.get_ollama_models.fetch_cached", new_callable=AsyncMock)
+async def test_fill_sizes_from_manifests_fills_empty_size(mock_fetch_cached: AsyncMock) -> None:
+    mock_fetch_cached.return_value = _manifest(("model", 9_527_000_000))
+    _mock_session = MagicMock()
+    entries = [_entry_with_size("nimble:9b", "")]
+
+    result = await fill_sizes_from_manifests(_mock_session, asyncio.Semaphore(1), entries, True)
+
+    assert result == [_entry_with_size("nimble:9b", "9.5GB")]
+    assert mock_fetch_cached.call_count == 1
+    assert mock_fetch_cached.call_args == call(
+        _mock_session,
+        "https://registry.ollama.ai/v2/library/nimble/manifests/9b",
+        Path("./ollama/manifests/nimble_9b.json"),
+        True,
+    )
+
+
+@pytest.mark.asyncio
+@patch("scripts.get_ollama_models.fetch_cached", new_callable=AsyncMock)
+async def test_fill_sizes_from_manifests_keeps_known_size(mock_fetch_cached: AsyncMock) -> None:
+    entries = [_entry_with_size("nimble:9b-q8_0", "9.5GB")]
+
+    result = await fill_sizes_from_manifests(MagicMock(), asyncio.Semaphore(1), entries, False)
+
+    assert result == [_entry_with_size("nimble:9b-q8_0", "9.5GB")]
+    assert mock_fetch_cached.call_count == 0
+
+
+@pytest.mark.parametrize(
+    "fetch_result",
+    [
+        pytest.param(OSError("network error"), id="fetch_failure"),
+        pytest.param(["not a manifest"], id="invalid_json"),
+    ],
+)
+@pytest.mark.asyncio
+@patch("scripts.get_ollama_models.fetch_cached", new_callable=AsyncMock)
+async def test_fill_sizes_from_manifests_leaves_size_empty_on_error(
+    mock_fetch_cached: AsyncMock, fetch_result: Exception | list[str]
+) -> None:
+    mock_fetch_cached.side_effect = fetch_result
+    entries = [_entry_with_size("nimble:9b", "")]
+
+    result = await fill_sizes_from_manifests(MagicMock(), asyncio.Semaphore(1), entries, False)
+
+    assert result == [_entry_with_size("nimble:9b", "")]
+    assert mock_fetch_cached.call_count == 1
+
+
+@pytest.mark.asyncio
+@patch("scripts.get_ollama_models.fetch_cached", new_callable=AsyncMock)
+async def test_fetch_model_tags_fills_size_range_from_manifest(mock_fetch_cached: AsyncMock) -> None:
+    model_html = _SIMPLE_MODEL_HTML.replace("4 GB", "9.3GB - 9.5GB")
+    mock_fetch_cached.side_effect = (model_html, _SIMPLE_TAGS_HTML, _manifest(("model", 9_527_000_000)))
+    _mock_session = MagicMock()
+    model: ModelInfo = {"name": "testmodel", "capabilities": []}
+
+    _, _, entries = await fetch_model_tags(_mock_session, asyncio.Semaphore(1), model, False, {})
+
+    assert [(e["name"], e["size"]) for e in entries] == [("testmodel:7b", "9.5GB")]
+    assert mock_fetch_cached.call_count == 3
+    assert mock_fetch_cached.call_args == call(
+        _mock_session,
+        "https://registry.ollama.ai/v2/library/testmodel/manifests/7b",
+        Path("./ollama/manifests/testmodel_7b.json"),
+        False,
+    )
+
+
 @pytest.mark.asyncio
 async def test_fetch_model_tags_successful_fetch_returns_entries() -> None:
     model: ModelInfo = {"name": "testmodel", "capabilities": []}
@@ -606,16 +737,19 @@ async def test_fetch_model_tags_pick_tags_filters_entries() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_extra_model_specific_tag_returns_matched_entry() -> None:
-    async def fake_fallback(session: aiohttp.ClientSession, candidates: list[str], path: Path, use_cache: bool) -> str:
-        return _TAGS_HTML
+@patch("scripts.get_ollama_models.fetch_cached", new_callable=AsyncMock)
+@patch("scripts.get_ollama_models.fetch_with_fallback", new_callable=AsyncMock)
+async def test_fetch_extra_model_specific_tag_returns_matched_entry(
+    mock_fetch_with_fallback: AsyncMock, mock_fetch_cached: AsyncMock
+) -> None:
+    mock_fetch_with_fallback.return_value = _TAGS_HTML
+    mock_fetch_cached.return_value = _manifest(("model", 4_700_000_000))
 
-    with patch("scripts.get_ollama_models.fetch_with_fallback", side_effect=fake_fallback):
-        category, name, entries = await fetch_extra_model(MagicMock(), asyncio.Semaphore(1), "llama3:8b", "llms", False, {})
+    category, name, entries = await fetch_extra_model(MagicMock(), asyncio.Semaphore(1), "llama3:8b", "llms", False, {})
 
     assert name == "llama3"
     assert category == "llms"
-    assert any(e["name"] == "llama3:8b" for e in entries)
+    assert [(e["name"], e["size"]) for e in entries] == [("llama3:8b", "4.7GB")]
 
 
 @pytest.mark.asyncio
