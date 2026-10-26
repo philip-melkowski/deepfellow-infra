@@ -33,7 +33,7 @@ CACHE_DIR = Path("./ollama")
 BASE_URL = "https://ollama.com"
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-Category = Literal["embeddings", "llms", "txt2img"]
+Category = Literal["embeddings", "llms", "txt2img", "decision"]
 
 
 class ModelInfo(TypedDict):
@@ -66,6 +66,7 @@ class MinJson(TypedDict):
     embeddings: list[ModelEntry]
     llms: list[ModelEntry]
     txt2img: list[ModelEntry]
+    decision: list[ModelEntry]
 
 
 class ExtraSpecExtra(TypedDict):
@@ -279,6 +280,8 @@ def parse_tags_hashes(html: str) -> dict[str, str]:
 def capability_to_category(capabilities: list[str]) -> Category:
     """Map a model's capability list to an output category key."""
     caps_lower = [c.lower() for c in capabilities]
+    if "decision" in caps_lower:
+        return "decision"
     if any("embed" in c for c in caps_lower):
         return "embeddings"
     if any(c in ("image generation", "text-to-image", "txt2img", "image") for c in caps_lower):
@@ -417,7 +420,7 @@ async def build_min_json(use_cache: bool, concurrency: int, extra_specs: ExtraSp
             ]
         )
 
-        output: MinJson = {"embeddings": [], "llms": [], "txt2img": []}
+        output: MinJson = {"embeddings": [], "llms": [], "txt2img": [], "decision": []}
         for i, done in enumerate(asyncio.as_completed(tasks), 1):
             category, name, entries = await done
             print(f"[{i}/{len(tasks)}] {name} ({category}) - {len(entries)} tags", file=sys.stderr)
@@ -471,12 +474,12 @@ async def main() -> None:
     if args.merge and Path(args.merge).exists():
         merge_path = Path(args.merge)
         merge_data: dict[str, list[ModelEntry]] = json.loads(merge_path.read_text(encoding="utf-8"))
-        for category in ("embeddings", "llms", "txt2img"):
+        for category in ("embeddings", "llms", "txt2img", "decision"):
             data[category].extend(merge_data.get(category, []))  # type: ignore[literal-required]
         total_merged = sum(len(v) for v in merge_data.values())
         print(f"Merged {total_merged} entries from {args.merge}", file=sys.stderr)
 
-    for entries in (data["embeddings"], data["llms"], data["txt2img"]):
+    for entries in (data["embeddings"], data["llms"], data["txt2img"], data["decision"]):
         entries.sort(key=lambda e: e["name"].casefold())
 
     output_path = Path(args.output)
@@ -484,11 +487,12 @@ async def main() -> None:
     async with aiofiles.open(output_path, "w", encoding="utf-8") as f:
         await f.write(json.dumps(data, indent=4))
 
-    total = len(data["embeddings"]) + len(data["llms"]) + len(data["txt2img"])
+    total = len(data["embeddings"]) + len(data["llms"]) + len(data["txt2img"]) + len(data["decision"])
     print(f"Written {total} tags to {output_path}", file=sys.stderr)
     print(f"  embeddings: {len(data['embeddings'])}", file=sys.stderr)
     print(f"  llms:       {len(data['llms'])}", file=sys.stderr)
     print(f"  txt2img:    {len(data['txt2img'])}", file=sys.stderr)
+    print(f"  decision:   {len(data['decision'])}", file=sys.stderr)
 
 
 if __name__ == "__main__":

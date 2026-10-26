@@ -12,7 +12,15 @@ import type { MeshTopologyModel } from "@/deepfellow/types";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { useState } from "react";
 
-const TYPE_ORDER = ["llm", "embedding", "tts", "stt", "txt2img", "mcp"];
+const TYPE_ORDER = [
+  "llm",
+  "embedding",
+  "tts",
+  "stt",
+  "txt2img",
+  "decision",
+  "mcp",
+];
 
 const TYPE_LABELS: Record<string, string> = {
   llm: "LLM",
@@ -20,6 +28,7 @@ const TYPE_LABELS: Record<string, string> = {
   tts: "TTS",
   stt: "STT",
   txt2img: "Image",
+  decision: "Decision",
   mcp: "MCP Servers",
 };
 

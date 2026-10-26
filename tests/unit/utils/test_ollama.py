@@ -14,8 +14,10 @@ from server.utils.ollama import (
     MLX_RUNTIME_UNAVAILABLE_MESSAGE,
     UNSUPPORTED_MLX_ARCHITECTURE_MESSAGE,
     UNSUPPORTED_QUANTIZATION_TYPE_MESSAGE,
+    decision_models_unsupported_message,
     get_ollama_create_error_message,
     raise_ollama_pull_error,
+    supports_decision_models,
     supports_gguf_quantization,
 )
 
@@ -117,3 +119,15 @@ def test_get_ollama_create_error_message_empty_string_returns_none() -> None:
 )
 def test_supports_gguf_quantization(ollama_version: str, expected: bool | None) -> None:
     assert supports_gguf_quantization(ollama_version) is expected
+
+
+@pytest.mark.parametrize(
+    ("ollama_version", "expected"),
+    [("0.34.1", False), ("0.35.0-rc0", False), ("0.35.0", True), ("0.40.8", True), ("not-a-version", None)],
+)
+def test_supports_decision_models(ollama_version: str, expected: bool | None) -> None:
+    assert supports_decision_models(ollama_version) is expected
+
+
+def test_decision_models_unsupported_message_names_required_and_actual_version() -> None:
+    assert decision_models_unsupported_message("0.34.1") == "Decision models need Ollama 0.35.0 or newer; this Ollama is 0.34.1."

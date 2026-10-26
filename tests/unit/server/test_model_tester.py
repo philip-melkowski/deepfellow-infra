@@ -602,6 +602,68 @@ def _custom_response(status_code: int, content: bytes = b"") -> StreamingRespons
 
 
 @pytest.mark.asyncio
+async def test_test_systemone_returns_chosen_option() -> None:
+    tester = ModelTester()
+    _mock_on_request = AsyncMock(
+        return_value=_make_json_streaming_response(
+            {
+                "model": "tev1:0.8b",
+                "answers": {"label": {"type": "choice", "choice": "bug", "probabilities": {"bug": 0.92}, "confidence": 0.88}},
+                "usage": {"input_tokens": 174, "output_tokens": 0},
+            }
+        )
+    )
+    endpoint: SimpleEndpoint[Any] = SimpleEndpoint(on_request=_mock_on_request)
+
+    result = await tester._test_systemone("tev1:0.8b", endpoint)  # pyright: ignore[reportPrivateUsage]
+
+    assert result["result"] == "ok"
+    assert result["output"] == "bug"
+    assert _mock_on_request.call_count == 1
+    sent = _mock_on_request.call_args.args[0]
+    assert sent.model == "tev1:0.8b"
+    assert sent.questions["label"].type == "choice"
+
+
+@pytest.mark.asyncio
+async def test_test_systemone_raises_test_error_without_answers() -> None:
+    tester = ModelTester()
+    endpoint: SimpleEndpoint[Any] = SimpleEndpoint(on_request=AsyncMock(return_value=_make_json_streaming_response({"model": "x"})))
+
+    with pytest.raises(ModelTestError) as exc_info:
+        await tester._test_systemone("tev1:0.8b", endpoint)  # pyright: ignore[reportPrivateUsage]
+
+    assert exc_info.value.error == "Cannot read decision answer"
+
+
+@pytest.mark.asyncio
+async def test_test_systemone_raises_test_error_on_backend_error() -> None:
+    tester = ModelTester()
+    endpoint: SimpleEndpoint[Any] = SimpleEndpoint(
+        on_request=AsyncMock(return_value=_make_json_streaming_response({"error": "does not support chat"}, status_code=400))
+    )
+
+    with pytest.raises(ModelTestError) as exc_info:
+        await tester._test_systemone("tev1:0.8b", endpoint)  # pyright: ignore[reportPrivateUsage]
+
+    assert exc_info.value.error == "Invalid status code"
+
+
+@pytest.mark.asyncio
+async def test_perform_test_dispatches_decision() -> None:
+    tester = ModelTester()
+    entry = _make_registered_model("decision")
+    entry.registered_model.endpoint = SimpleEndpoint(
+        on_request=AsyncMock(return_value=_make_json_streaming_response({"answers": {"label": {"type": "choice", "choice": "bug"}}}))
+    )
+
+    result = await tester._perform_test(entry)  # pyright: ignore[reportPrivateUsage]
+
+    assert result["result"] == "ok"
+    assert result["output"] == "bug"
+
+
+@pytest.mark.asyncio
 async def test_perform_test_custom_sends_get_to_health_then_test_model() -> None:
     tester = ModelTester()
     entry, on_request = _make_custom_entry(_custom_response(200, b"up"), _custom_response(200, b"passed"))

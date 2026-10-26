@@ -17,6 +17,7 @@ export const MODEL_TYPES = {
   lora: "LORA (lora)",
   reranker: "Reranker (reranker)",
   txt2img: "Text to image (txt2img)",
+  decision: "Decision model (System One)",
   mcp: "MCP Server",
 } as const;
 

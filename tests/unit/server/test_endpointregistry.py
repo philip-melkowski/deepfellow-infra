@@ -57,6 +57,7 @@ from server.models.api import (
     Reasoning,
     RerankRequest,
     ResponsesRequest,
+    SystemOneRequest,
 )
 from server.utils.core import HttpClientError
 from server.websockets.models import UsageChangeRequest
@@ -5526,3 +5527,204 @@ async def test_unwrap_json_text_replays_json_reply_without_text_field(raw: bytes
     assert result.status_code == 200
     assert result.headers["x-test"] == "1"
     assert await _collect(result.body_iterator) == raw
+
+
+def _systemone_body(model: str = "tev1") -> SystemOneRequest:
+    return SystemOneRequest.model_validate(
+        {
+            "model": model,
+            "state": "Our checkout has returned 500 errors since 9am.",
+            "questions": {"label": {"type": "choice", "instructions": "Which label?", "criteria": {"bug": None, "billing": "Payments"}}},
+        }
+    )
+
+
+def test_register_systemone_registers_model_listed_as_decision():
+    reg = make_registry()
+
+    reg.register_systemone("tev1", make_props(type="decision", endpoints=["/v1/systemone"]), SimpleEndpoint(on_request=AsyncMock()), None)
+
+    assert reg.systemone_endpoints.has_model("tev1")
+    model = reg.get_model("tev1")
+    assert model.props.type == "decision"
+    assert model.props.endpoints == ["/v1/systemone"]
+    assert [m.type for m in reg.list_models() if m.name == "tev1"] == ["decision"]
+    assert "tev1" in [m.id for m in reg.get_models().data]
+    assert reg.model_exists("tev1")
+
+
+def test_list_own_models_includes_local_systemone_model():
+    reg = make_registry()
+
+    reg.register_systemone("tev1", make_props(type="decision"), SimpleEndpoint(on_request=AsyncMock()), RegistrationOptions(origin="local"))
+
+    assert [m.name for m in reg.list_own_models()] == ["tev1"]
+
+
+def test_register_systemone_as_proxy_registers_model():
+    reg = make_registry()
+
+    reg.register_systemone_as_proxy("tev1", make_props(type="decision"), ProxyOptions(url="http://example.com/v1/systemone"), None)
+
+    assert reg.systemone_endpoints.has_model("tev1")
+
+
+def test_unregister_systemone_removes_model():
+    reg = make_registry()
+    rid = reg.register_systemone("tev1", make_props(type="decision"), SimpleEndpoint(on_request=AsyncMock()), None)
+
+    reg.unregister_systemone("tev1", rid)
+
+    assert not reg.systemone_endpoints.has_model("tev1")
+    assert "tev1" not in [m.id for m in reg.get_models().data]
+
+
+@pytest.mark.asyncio
+@patch("server.endpointregistry.make_http_request", new_callable=AsyncMock)
+async def test_register_systemone_as_proxy_forwards_rewritten_request_and_returns_backend_response(mock_make_http_request: AsyncMock):
+    reg = make_registry()
+    reg.register_systemone_as_proxy(
+        "tev1", make_props(type="decision"), ProxyOptions(url="http://ollama:11434/v1/systemone", rewrite_model_to="tev1:0.8b"), None
+    )
+    ep = reg.systemone_endpoints.get_model("tev1")
+    backend_error = StreamingResponse(_async_byte_stream(b'{"error":"bad"}'), status_code=400)
+    _mock_http_response = MagicMock()
+    _mock_http_response.as_streaming_response.return_value = backend_error
+    mock_make_http_request.return_value = _mock_http_response
+
+    result = await ep.endpoint.on_request(_systemone_body(), None)  # pyright: ignore[reportOptionalMemberAccess]
+
+    assert result is backend_error
+    assert mock_make_http_request.call_count == 1
+    assert mock_make_http_request.call_args.kwargs["url"] == "http://ollama:11434/v1/systemone"
+    sent = json.loads(mock_make_http_request.call_args.kwargs["data"]._value)
+    assert sent["model"] == "tev1:0.8b"
+    assert sent["questions"]["label"]["criteria"] == {"bug": None, "billing": "Payments"}
+
+
+@pytest.mark.asyncio
+@patch("server.endpointregistry.make_http_request", new_callable=AsyncMock)
+async def test_register_systemone_as_proxy_keeps_null_state_in_sent_payload(mock_make_http_request: AsyncMock):
+    reg = make_registry()
+    reg.register_systemone_as_proxy("tev1", make_props(type="decision"), ProxyOptions(url="http://ollama:11434/v1/systemone"), None)
+    ep = reg.systemone_endpoints.get_model("tev1")
+    mock_make_http_request.return_value = MagicMock()
+    body = SystemOneRequest.model_validate({"model": "tev1", "state": None, "questions": {"urgent": {"type": "noul"}}})
+
+    await ep.endpoint.on_request(body, None)  # pyright: ignore[reportOptionalMemberAccess]
+
+    sent = json.loads(mock_make_http_request.call_args.kwargs["data"]._value)
+    assert "state" in sent
+    assert sent["state"] is None
+    assert sent["questions"] == {"urgent": {"type": "noul"}}
+
+
+@pytest.mark.asyncio
+@patch.object(EndpointRegistry, "with_usage", new_callable=AsyncMock)
+async def test_execute_systemone_wraps_local_model_with_usage(mock_with_usage: AsyncMock):
+    reg = make_registry()
+    _mock_response = MagicMock()
+    mock_with_usage.return_value = _mock_response
+    reg.register_systemone(
+        "tev1",
+        make_props(type="decision"),
+        SimpleEndpoint(on_request=AsyncMock(return_value=_mock_response)),
+        RegistrationOptions(origin="local"),
+    )
+
+    result = await reg.execute_systemone(_systemone_body())
+
+    assert result is _mock_response
+    assert mock_with_usage.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_systemone_calls_on_request_directly_for_remote_model():
+    reg = make_registry()
+    _mock_response = MagicMock()
+    _mock_on_request = AsyncMock(return_value=_mock_response)
+    reg.register_systemone(
+        "tev1", make_props(type="decision"), SimpleEndpoint(on_request=_mock_on_request), RegistrationOptions(origin="remote")
+    )
+    body = _systemone_body()
+
+    result = await reg.execute_systemone(body)
+
+    assert result is _mock_response
+    assert _mock_on_request.call_count == 1
+    assert _mock_on_request.call_args == call(body, None)
+
+
+@pytest.mark.asyncio
+async def test_execute_systemone_logs_payload_when_enabled(caplog: pytest.LogCaptureFixture):
+    reg = make_registry()
+    reg.config.is_log_payloads_enabled.return_value = True  # pyright: ignore[reportAttributeAccessIssue]
+    reg.register_systemone(
+        "tev1", make_props(type="decision"), SimpleEndpoint(on_request=AsyncMock()), RegistrationOptions(origin="remote")
+    )
+
+    with caplog.at_level(logging.INFO):
+        await reg.execute_systemone(_systemone_body())
+
+    assert "DUMP REQUEST PAYLOAD /v1/systemone" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_execute_systemone_raises_404_when_not_registered():
+    reg = make_registry()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await reg.execute_systemone(_systemone_body("unknown"))
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == "Model not found"
+
+
+@pytest.mark.asyncio
+async def test_execute_systemone_raises_400_when_model_is_not_a_decision_model():
+    reg = make_registry()
+    reg.register_chat_completion("llama", make_props(), make_chat_endpoint(), RegistrationOptions(origin="local"))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await reg.execute_systemone(_systemone_body("llama"))
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Given model is not supported"
+
+
+@pytest.mark.asyncio
+async def test_execute_chat_completion_rejects_decision_model_without_forwarding():
+    reg = make_registry()
+    _mock_on_request = AsyncMock()
+    reg.register_systemone(
+        "tev1", make_props(type="decision"), SimpleEndpoint(on_request=_mock_on_request), RegistrationOptions(origin="local")
+    )
+    body = MagicMock(spec=ChatCompletionRequest)
+    body.model = "tev1"
+    body.model_dump_json.return_value = "{}"
+
+    with pytest.raises(HTTPException) as exc_info:
+        await reg.execute_chat_completion(body)
+
+    assert exc_info.value.status_code == 400
+    assert _mock_on_request.call_count == 0
+
+
+@pytest.mark.asyncio
+@patch("server.endpointregistry.make_http_request", new_callable=AsyncMock)
+async def test_register_proxy_decision_proxies_to_child_systemone(mock_make_http_request: AsyncMock):
+    reg = make_registry()
+    reg._register_proxy(  # pyright: ignore[reportPrivateUsage]
+        "tev1", "decision", make_props(type="decision"), "http://child:8086/", "child-key", RegistrationOptions(origin="http://child:8086/")
+    )
+    ep = reg.systemone_endpoints.get_model("tev1")
+    _mock_http_response = MagicMock()
+    _mock_http_response.as_streaming_response.return_value = MagicMock()
+    mock_make_http_request.return_value = _mock_http_response
+
+    await ep.endpoint.on_request(_systemone_body(), None)  # pyright: ignore[reportOptionalMemberAccess]
+
+    assert reg.systemone_endpoints.has_model("tev1")
+    assert mock_make_http_request.call_count == 1
+    assert mock_make_http_request.call_args.kwargs["url"] == "http://child:8086/v1/systemone"
+    assert mock_make_http_request.call_args.kwargs["headers"]["Authorization"] == "Bearer child-key"

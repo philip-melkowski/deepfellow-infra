@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- `POST /v1/systemone` serves Ollama decision models (new model type `decision`); needs Ollama 0.35.0 or newer.
 - Chat completions accept `thinking_token_budget`, `chat_template_kwargs`, `repetition_detection`, `top_k`, `min_p`, `repetition_penalty`, `presence_penalty`, `frequency_penalty`, `logprobs` and `parallel_tool_calls`, passed to self-hosted backends and mesh peers only.
 - Legacy completions (`/v1/completions`) accept `thinking_token_budget`, `repetition_detection`, `top_k`, `min_p` and `repetition_penalty`, passed to self-hosted backends and mesh peers only.
 - `/admin/config` limits `max_generated_tokens`, `max_context_tokens`, `max_choices`, `max_top_k`.
@@ -16,6 +17,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- Installed Ollama decision models move from the chat endpoints to `/v1/systemone` on restart.
+- Mesh: upgrade every node before any of them has a decision model; older nodes reject peers that report one.
 - Default Ollama image is now `0.40.8`; unpinned instances switch on next start and keep their models.
 - LLM requests above the `/admin/config` generation limits get a 422 instead of reaching the model.
 - `n` above `max_choices` (default 16) gets a 422; the previous fixed cap was 128.

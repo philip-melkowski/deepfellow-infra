@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: 2026 Simplito sp. z o.o.
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -27,6 +28,12 @@ from server.models.api import (
     ReasoningContentItem,
     ReasoningSummary,
     ResponsesRequest,
+    SystemOneChoiceQuestion,
+    SystemOneNoulQuestion,
+    SystemOneRequest,
+    SystemOneResponse,
+    SystemOneScoreAnswer,
+    SystemOneScoreQuestion,
 )
 
 
@@ -591,6 +598,156 @@ def test_model_props_context_window_defaults_to_none() -> None:
 
     assert props.context_window is None
     assert props.max_context_window is None
+
+
+SYSTEMONE_DOC_EXAMPLE = {
+    "model": "nimble",
+    "state": "Our checkout has returned 500 errors since 9am.",
+    "questions": {
+        "label": {
+            "type": "choice",
+            "instructions": "Which label fits this ticket?",
+            "criteria": {"billing": "Payments and refunds", "bug": "Software errors", "account": "Login and account access"},
+        }
+    },
+}
+
+
+def test_systemone_request_parses_ollama_doc_example() -> None:
+    request = SystemOneRequest.model_validate(SYSTEMONE_DOC_EXAMPLE)
+
+    assert request.model == "nimble"
+    assert isinstance(request.questions["label"], SystemOneChoiceQuestion)
+    assert request.model_dump(exclude_none=True) == SYSTEMONE_DOC_EXAMPLE
+
+
+def test_systemone_request_parses_every_question_type() -> None:
+    request = SystemOneRequest.model_validate(
+        {
+            "model": "tev1:0.8b",
+            "state": {"ticket": "500 errors"},
+            "questions": {
+                "urgent": {"type": "noul", "instructions": "Is this urgent?"},
+                "severity": {"type": "score", "instructions": "How severe?", "criteria": ["trivial", "major"]},
+            },
+            "keep_alive": "5m",
+        }
+    )
+
+    assert isinstance(request.questions["urgent"], SystemOneNoulQuestion)
+    assert isinstance(request.questions["severity"], SystemOneScoreQuestion)
+    assert request.state == {"ticket": "500 errors"}
+
+
+def test_systemone_request_keeps_null_choice_criteria_when_dumped_without_none() -> None:
+    request = SystemOneRequest.model_validate(
+        {
+            "model": "nimble",
+            "state": "x",
+            "questions": {"label": {"type": "choice", "instructions": "i", "criteria": {"bug": None, "billing": "Payments"}}},
+        }
+    )
+
+    dumped = request.model_dump(exclude_none=True)
+
+    assert dumped["questions"]["label"]["criteria"] == {"bug": None, "billing": "Payments"}
+
+
+def test_systemone_request_omits_unset_optional_fields_when_dumped_without_none() -> None:
+    request = SystemOneRequest.model_validate({"model": "nimble", "state": "x", "questions": {"u": {"type": "noul", "instructions": "i"}}})
+
+    assert request.model_dump(exclude_none=True) == {
+        "model": "nimble",
+        "state": "x",
+        "questions": {"u": {"type": "noul", "instructions": "i"}},
+    }
+
+
+def test_systemone_request_keeps_unknown_fields() -> None:
+    request = SystemOneRequest.model_validate(
+        {
+            "model": "nimble",
+            "state": "x",
+            "questions": {"u": {"type": "noul", "instructions": "i", "future_option": 1}},
+            "future_field": True,
+        }
+    )
+
+    dumped = request.model_dump(exclude_none=True)
+
+    assert dumped["future_field"] is True
+    assert dumped["questions"]["u"]["future_option"] == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"model": "nimble", "state": "x"},
+        {"model": "nimble", "state": "x", "questions": {"q": {"type": "rank", "instructions": "i"}}},
+        {"model": "nimble", "state": "x", "questions": {"q": {"type": "choice", "instructions": "i"}}},
+        {"state": "x", "questions": {"q": {"type": "noul", "instructions": "i"}}},
+        {"model": "nimble", "questions": {"q": {"type": "noul", "instructions": "i"}}},
+    ],
+    ids=["missing-questions", "unknown-question-type", "choice-without-criteria", "missing-model", "missing-state"],
+)
+def test_systemone_request_rejects_invalid_body(body: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        SystemOneRequest.model_validate(body)
+
+
+def test_systemone_request_accepts_questions_without_instructions() -> None:
+    request = SystemOneRequest.model_validate(
+        {
+            "model": "Cloudflare/clef-omni",
+            "state": "x",
+            "questions": {
+                "label": {"type": "choice", "criteria": {"bug": None}},
+                "urgent": {"type": "noul"},
+                "severity": {"type": "score", "criteria": ["low", "high"]},
+            },
+        }
+    )
+
+    dumped = request.model_dump(exclude_none=True)
+
+    assert all("instructions" not in question for question in dumped["questions"].values())
+
+
+def test_systemone_request_keeps_null_state_when_dumped_without_none() -> None:
+    request = SystemOneRequest.model_validate(
+        {"model": "LiquidAI/d1-3B", "state": None, "questions": {"u": {"type": "noul"}}, "chat_template_kwargs": {"enable_thinking": False}}
+    )
+
+    assert request.model_dump(exclude_none=True) == {
+        "model": "LiquidAI/d1-3B",
+        "state": None,
+        "questions": {"u": {"type": "noul"}},
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    assert json.loads(request.model_dump_json(exclude_none=True))["state"] is None
+
+
+def test_systemone_response_parses_every_answer_type() -> None:
+    response = SystemOneResponse.model_validate(
+        {
+            "model": "tev1:0.8b",
+            "answers": {
+                "label": {"type": "choice", "choice": "bug", "probabilities": {"bug": 0.9, "billing": 0.1}, "confidence": 0.8},
+                "urgent": {"type": "noul", "noul": 0.71},
+                "severity": {
+                    "type": "score",
+                    "score": 2.36,
+                    "legend": {"0": "trivial", "1": "minor", "2": "major", "3": "critical"},
+                    "probabilities": {"0": 0.01, "1": 0.02, "2": 0.58, "3": 0.39},
+                    "confidence": 0.58,
+                },
+            },
+            "usage": {"input_tokens": 406, "output_tokens": 0},
+        }
+    )
+
+    assert isinstance(response.answers["severity"], SystemOneScoreAnswer)
+    assert response.usage.input_tokens == 406
 
 
 _CHAT_BASE: dict[str, object] = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
