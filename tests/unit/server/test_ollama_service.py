@@ -1,17 +1,32 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: 2026 Simplito sp. z o.o.
 
+import errno
 import json
+import os
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from collections.abc import AsyncGenerator, Callable, Iterator
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from server.docker import DockerOptions
+from server.models.models import InstallModelIn
 from server.models.services import InstallServiceIn
-from server.services.ollama_service import InstalledInfo, LoadedModelInfo, ModelCapabilities, ModelSize, OllamaOptions, OllamaService
-from server.utils.core import FetchResult
+from server.services.ollama_service import (
+    InstalledInfo,
+    LoadedModelInfo,
+    ModelCapabilities,
+    ModelSize,
+    OllamaModel,
+    OllamaOptions,
+    OllamaService,
+)
+from server.utils.core import DownloadedPacket, DownloadPacket, FetchResult, PreDownloadPacket
+from server.utils.ollama_registry import BlobLocks, OllamaModelRef, OllamaRegistryClient, OllamaRegistryError, parse_model_ref
 from server.utils.vram_calculator import ArchParams
 
 _ARCH = ArchParams(
@@ -30,6 +45,10 @@ def _make_service() -> OllamaService:
     svc._vram_cache = {}  # pyright: ignore[reportPrivateUsage]
     svc._log_cache = {}  # pyright: ignore[reportPrivateUsage]
     svc._ps_query_failing = set()  # pyright: ignore[reportPrivateUsage]
+    svc._blob_locks = BlobLocks()  # pyright: ignore[reportPrivateUsage]
+    svc._installing = set()  # pyright: ignore[reportPrivateUsage]
+    svc.models = {}
+    svc.models_download_progress = {}
     svc.config = MagicMock()
     svc.config.ollama_vram_overhead_factor = 1.0
     return svc
@@ -832,3 +851,409 @@ async def test_download_with_ollama_logs_progress_percentage(caplog: pytest.LogC
     assert "llama3" in caplog.text
     assert "50%" in caplog.text
     assert caplog.text.count("100%") == 1
+
+
+def test_ollama_options_mode_defaults_to_online() -> None:
+    assert OllamaOptions().mode == "online"
+    assert OllamaOptions.model_validate({"mode": ""}).mode == "online"
+    assert OllamaOptions.model_validate({"mode": None}).mode == "online"
+
+
+def test_ollama_options_mode_accepts_offline() -> None:
+    assert OllamaOptions.model_validate({"mode": "offline"}).mode == "offline"
+
+
+def test_ollama_options_mode_rejects_unknown_value() -> None:
+    with pytest.raises(ValidationError):
+        OllamaOptions.model_validate({"mode": "sideways"})
+
+
+def _ref(model: str) -> OllamaModelRef:
+    ref = parse_model_ref(model)
+    assert ref is not None
+    return ref
+
+
+@pytest.fixture
+def download_service(tmp_path: Path) -> Iterator[OllamaService]:
+    with patch.object(OllamaService, "_get_working_dir", return_value=str(tmp_path)):
+        yield _make_service()
+
+
+def _fake_registry_download(
+    packets: list[DownloadPacket] | None = None, error: Exception | None = None
+) -> Callable[[object, object], AsyncGenerator[DownloadPacket]]:
+    async def download(self: object, ref: object) -> AsyncGenerator[DownloadPacket]:
+        for packet in packets or []:
+            yield packet
+        if error is not None:
+            raise error
+
+    return download
+
+
+@pytest.mark.asyncio
+@patch.object(OllamaService, "is_model_installed", new_callable=AsyncMock)
+@patch.object(OllamaService, "_download_with_registry_client", new_callable=AsyncMock)
+@patch.object(OllamaService, "_download_with_ollama", new_callable=AsyncMock)
+async def test_download_with_downloader_uses_api_pull_for_online_registry_model(
+    mock_download_with_ollama: AsyncMock,
+    mock_download_with_registry_client: AsyncMock,
+    mock_is_model_installed: AsyncMock,
+    download_service: OllamaService,
+) -> None:
+    await download_service._download_with_downloader(MagicMock(), "http://localhost:11434", "llama3.2", "llama3.2", "2GB", 0, 1)  # pyright: ignore[reportPrivateUsage]
+
+    assert mock_download_with_ollama.await_count == 1
+    assert mock_download_with_registry_client.await_count == 0
+    assert mock_is_model_installed.await_count == 0
+
+
+@pytest.mark.asyncio
+@patch.object(OllamaService, "is_model_installed", new_callable=AsyncMock, return_value=True)
+@patch.object(OllamaService, "_download_with_registry_client", new_callable=AsyncMock)
+@patch.object(OllamaService, "_download_with_ollama", new_callable=AsyncMock)
+async def test_download_with_downloader_uses_registry_client_for_offline_registry_model(
+    mock_download_with_ollama: AsyncMock,
+    mock_download_with_registry_client: AsyncMock,
+    mock_is_model_installed: AsyncMock,
+    download_service: OllamaService,
+) -> None:
+    stream = MagicMock()
+
+    await download_service._download_with_downloader(  # pyright: ignore[reportPrivateUsage]
+        stream, "http://localhost:11434", "llama3.2:3b", "llama3.2:3b", "2GB", 0, 1, offline=True
+    )
+
+    assert mock_download_with_ollama.await_count == 0
+    assert mock_download_with_registry_client.await_count == 1
+    assert mock_download_with_registry_client.await_args == call(stream, _ref("llama3.2:3b"), "2GB")
+    assert mock_is_model_installed.await_args == call("http://localhost:11434", "llama3.2:3b")
+
+
+@pytest.mark.asyncio
+@patch.object(OllamaService, "is_model_installed", new_callable=AsyncMock, return_value=False)
+@patch.object(OllamaService, "_download_with_registry_client", new_callable=AsyncMock)
+async def test_download_with_downloader_fails_when_ollama_does_not_see_the_downloaded_model(
+    mock_download_with_registry_client: AsyncMock, mock_is_model_installed: AsyncMock, download_service: OllamaService
+) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        await download_service._download_with_downloader(  # pyright: ignore[reportPrivateUsage]
+            MagicMock(), "http://localhost:11434", "llama3.2:3b", "llama3.2:3b", "2GB", 0, 1, offline=True
+        )
+
+    assert exc_info.value.status_code == 500
+    assert "does not see it" in exc_info.value.detail
+    assert mock_download_with_registry_client.await_count == 1
+    assert mock_is_model_installed.await_count == 1
+
+
+@pytest.mark.asyncio
+@patch.object(OllamaService, "_download_with_registry_client", new_callable=AsyncMock)
+@patch.object(OllamaService, "_download_with_ollama", new_callable=AsyncMock)
+async def test_download_with_downloader_rejects_other_registry_host_in_offline_mode(
+    mock_download_with_ollama: AsyncMock, mock_download_with_registry_client: AsyncMock, download_service: OllamaService
+) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        await download_service._download_with_downloader(  # pyright: ignore[reportPrivateUsage]
+            MagicMock(), "http://localhost:11434", "hf.co/org/repo", "hf.co/org/repo", "2GB", 0, 1, offline=True
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "offline mode" in exc_info.value.detail
+    assert mock_download_with_ollama.await_count == 0
+    assert mock_download_with_registry_client.await_count == 0
+
+
+@pytest.mark.asyncio
+@patch.object(OllamaService, "_download_with_registry_client", new_callable=AsyncMock)
+@patch.object(OllamaService, "_download_with_ollama", new_callable=AsyncMock)
+async def test_download_with_downloader_keeps_http_downloader_for_direct_url_in_offline_mode(
+    mock_download_with_ollama: AsyncMock, mock_download_with_registry_client: AsyncMock, download_service: OllamaService
+) -> None:
+    async def download(*args: object) -> AsyncGenerator[DownloadPacket]:
+        yield PreDownloadPacket(10)
+        yield DownloadedPacket(10)
+
+    download_service.model_downloader = MagicMock(download=download)
+
+    await download_service._download_with_downloader(  # pyright: ignore[reportPrivateUsage]
+        MagicMock(), "http://localhost:11434", "https://example.com/m.gguf", "m", "10B", 0, 1, offline=True
+    )
+
+    assert mock_download_with_ollama.await_count == 0
+    assert mock_download_with_registry_client.await_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("offline", [True, False])
+@patch.object(OllamaService, "_download_with_downloader", new_callable=AsyncMock)
+async def test_download_model_or_set_progress_forwards_offline(
+    mock_download_with_downloader: AsyncMock, offline: bool, download_service: OllamaService
+) -> None:
+    await download_service._download_model_or_set_progress(  # pyright: ignore[reportPrivateUsage]
+        MagicMock(), "http://localhost:11434", "llama3.2", "llama3.2", "2GB", offline=offline
+    )
+
+    assert mock_download_with_downloader.await_count == 1
+    assert mock_download_with_downloader.await_args.args[-1] is offline  # pyright: ignore[reportOptionalMemberAccess]
+
+
+def _install_service(download_service: OllamaService, model: OllamaModel, mode: str) -> InstalledInfo:
+    info = _make_installed_info()
+    info.parsed_options = OllamaOptions(mode=mode)  # pyright: ignore[reportArgumentType]
+    download_service.models = {"default": {model.id: model}}
+    return info
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("mode", "offline"), [("offline", True), ("online", False)])
+@patch.object(OllamaService, "_download_model_or_set_progress", new_callable=AsyncMock, side_effect=HTTPException(418))
+@patch.object(OllamaService, "is_model_installed", new_callable=AsyncMock, return_value=False)
+@patch.object(OllamaService, "get_instance_installed_info")
+async def test_install_model_forwards_offline_mode_of_the_instance(
+    mock_get_instance_installed_info: MagicMock,
+    mock_is_model_installed: AsyncMock,
+    mock_download_model_or_set_progress: AsyncMock,
+    mode: str,
+    offline: bool,
+    download_service: OllamaService,
+) -> None:
+    model = OllamaModel(id="llama3.2", size="2GB", type="llm", hash="h", context=None)
+    mock_get_instance_installed_info.return_value = _install_service(download_service, model, mode)
+
+    promise = await download_service._install_model("default", "llama3.2", InstallModelIn())  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(HTTPException) as exc_info:
+        await promise.wait()
+
+    assert exc_info.value.status_code == 418
+    assert mock_is_model_installed.await_count == 1
+    assert mock_download_model_or_set_progress.await_count == 1
+    assert mock_download_model_or_set_progress.await_args.kwargs["offline"] is offline  # pyright: ignore[reportOptionalMemberAccess]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("mode", "offline"), [("offline", True), ("online", False)])
+@patch.object(OllamaService, "_download_model_or_set_progress", new_callable=AsyncMock, side_effect=HTTPException(418))
+@patch.object(OllamaService, "is_model_installed", new_callable=AsyncMock, return_value=False)
+async def test_install_from_modelfile_forwards_offline_mode_of_the_instance(
+    mock_is_model_installed: AsyncMock,
+    mock_download_model_or_set_progress: AsyncMock,
+    mode: str,
+    offline: bool,
+    download_service: OllamaService,
+) -> None:
+    model = OllamaModel(id="my-llama", size="2GB", type="llm", hash="h", context=None)
+    info = _install_service(download_service, model, mode)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await download_service._install_from_modelfile(  # pyright: ignore[reportPrivateUsage]
+            MagicMock(), "my-llama", "FROM llama3.2:3b", "my-llama", info, model
+        )
+
+    assert exc_info.value.status_code == 418
+    assert mock_is_model_installed.await_args == call(info.base_url, "llama3.2:3b")
+    assert mock_download_model_or_set_progress.await_count == 1
+    assert mock_download_model_or_set_progress.await_args.kwargs["offline"] is offline  # pyright: ignore[reportOptionalMemberAccess]
+
+
+@pytest.mark.asyncio
+@patch.object(
+    OllamaRegistryClient,
+    "download",
+    _fake_registry_download(
+        [PreDownloadPacket(0), PreDownloadPacket(100), DownloadedPacket(1), DownloadedPacket(39), DownloadedPacket(60)]
+    ),
+)
+async def test_download_with_registry_client_reports_progress_up_to_one(download_service: OllamaService) -> None:
+    stream = MagicMock()
+
+    await download_service._download_with_registry_client(stream, _ref("llama3.2"), "1GB")  # pyright: ignore[reportPrivateUsage]
+
+    values = [emit_call.args[0]["value"] for emit_call in stream.emit.call_args_list]
+    assert values == pytest.approx([0, 0.01, 0.4, 1.0, 1])
+
+
+@pytest.mark.asyncio
+@patch.object(OllamaRegistryClient, "download", _fake_registry_download(error=OllamaRegistryError("Model nope not found", 404)))
+async def test_download_with_registry_client_maps_registry_error_to_http_exception(download_service: OllamaService) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        await download_service._download_with_registry_client(MagicMock(), _ref("nope"), "1GB")  # pyright: ignore[reportPrivateUsage]
+
+    assert exc_info.value.status_code == 404
+    assert "not found" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+@patch.object(OllamaRegistryClient, "download", _fake_registry_download(error=OllamaRegistryError("registry down")))
+async def test_download_with_registry_client_keeps_default_502_status(download_service: OllamaService) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        await download_service._download_with_registry_client(MagicMock(), _ref("llama3.2"), "1GB")  # pyright: ignore[reportPrivateUsage]
+
+    assert exc_info.value.status_code == 502
+
+
+@pytest.mark.asyncio
+@patch.object(OllamaRegistryClient, "download", _fake_registry_download(error=PermissionError("denied")))
+async def test_download_with_registry_client_maps_os_error_to_http_exception(download_service: OllamaService) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        await download_service._download_with_registry_client(MagicMock(), _ref("llama3.2"), "1GB")  # pyright: ignore[reportPrivateUsage]
+
+    assert exc_info.value.status_code == 500
+    assert "chown" not in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+@patch.object(OllamaRegistryClient, "download", _fake_registry_download(error=OSError(errno.EACCES, "Permission denied")))
+async def test_download_with_registry_client_tells_how_to_fix_a_permission_error(download_service: OllamaService, tmp_path: Path) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        await download_service._download_with_registry_client(MagicMock(), _ref("llama3.2"), "1GB")  # pyright: ignore[reportPrivateUsage]
+
+    assert exc_info.value.status_code == 500
+    assert "chown" in exc_info.value.detail
+    assert f"sudo chown -R {os.getuid()}:{os.getgid()} {tmp_path / 'main' / 'models'}" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+@patch.object(OllamaRegistryClient, "download", _fake_registry_download(error=OSError(errno.ENOSPC, "No space left on device")))
+async def test_download_with_registry_client_maps_full_disk_to_507(download_service: OllamaService) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        await download_service._download_with_registry_client(MagicMock(), _ref("llama3.2"), "1GB")  # pyright: ignore[reportPrivateUsage]
+
+    assert exc_info.value.status_code == 507
+
+
+@pytest.mark.asyncio
+@patch("server.services.ollama_service.OllamaRegistryClient")
+async def test_download_with_registry_client_writes_into_the_mounted_models_dir(
+    mock_registry_client: MagicMock, download_service: OllamaService, tmp_path: Path
+) -> None:
+    fake_download = _fake_registry_download([PreDownloadPacket(10), DownloadedPacket(10)])
+
+    def download(ref: OllamaModelRef) -> AsyncGenerator[DownloadPacket]:
+        return fake_download(None, ref)
+
+    mock_registry_client.return_value.download = download
+
+    await download_service._download_with_registry_client(MagicMock(), _ref("llama3.2"), "10B")  # pyright: ignore[reportPrivateUsage]
+
+    assert mock_registry_client.call_count == 1
+    assert mock_registry_client.call_args == call(tmp_path / "main" / "models", blob_locks=download_service._blob_locks)  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+@patch.object(OllamaRegistryClient, "download", _fake_registry_download([DownloadedPacket(10)]))
+async def test_download_with_registry_client_without_known_size_still_ends_at_one(download_service: OllamaService) -> None:
+    stream = MagicMock()
+
+    await download_service._download_with_registry_client(stream, _ref("llama3.2"), "")  # pyright: ignore[reportPrivateUsage]
+
+    assert [emit_call.args[0]["value"] for emit_call in stream.emit.call_args_list] == [0, 1]
+
+
+@pytest.mark.parametrize("mode", ["online", "offline"])
+def test_build_env_vars_leaves_ollama_blob_pruning_enabled(mode: str) -> None:
+    svc = _make_service()
+
+    envs = svc._build_env_vars(OllamaOptions(mode=mode), [])  # pyright: ignore[reportPrivateUsage, reportArgumentType]
+
+    assert "OLLAMA_NOPRUNE" not in envs
+
+
+def test_create_model_store_dirs_creates_the_dirs_ollama_would_create_as_root(download_service: OllamaService, tmp_path: Path) -> None:
+    download_service._create_model_store_dirs()  # pyright: ignore[reportPrivateUsage]
+
+    assert (tmp_path / "main" / "models" / "blobs").is_dir()
+    assert (tmp_path / "main" / "models" / "manifests" / "registry.ollama.ai" / "library").is_dir()
+
+
+def test_create_model_store_dirs_keeps_the_manifest_dir_from_being_pruned_as_empty(download_service: OllamaService, tmp_path: Path) -> None:
+    download_service._create_model_store_dirs()  # pyright: ignore[reportPrivateUsage]
+
+    assert (tmp_path / "main" / "models" / "manifests" / "registry.ollama.ai" / "library" / ".keep").is_file()
+
+
+def test_create_model_store_dirs_keeps_existing_content(download_service: OllamaService, tmp_path: Path) -> None:
+    blob = tmp_path / "main" / "models" / "blobs" / "sha256-x"
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(b"x")
+
+    download_service._create_model_store_dirs()  # pyright: ignore[reportPrivateUsage]
+
+    assert blob.read_bytes() == b"x"
+
+
+def _installed_info() -> InstalledInfo:
+    info = MagicMock(spec=InstalledInfo)
+    info.docker = MagicMock()
+    info.docker.name = "ollama"
+    info.docker.service_name = "ollama-service"
+    return info
+
+
+@pytest.mark.asyncio
+@patch("server.services.ollama_service.os.access", return_value=True)
+async def test_ensure_model_store_writable_does_nothing_when_dirs_are_writable(
+    mock_access: MagicMock, download_service: OllamaService
+) -> None:
+    download_service.docker_service = MagicMock(run_command_docker_compose=AsyncMock())
+
+    await download_service._ensure_model_store_writable(_ref("llama3.2"), _installed_info())  # pyright: ignore[reportPrivateUsage]
+
+    assert mock_access.called
+    assert download_service.docker_service.run_command_docker_compose.await_count == 0  # pyright: ignore[reportUnknownMemberType]
+
+
+@pytest.mark.asyncio
+@patch("server.services.ollama_service.os.access", side_effect=lambda path, mode: not str(path).endswith("registry.ollama.ai/library"))  # pyright: ignore[reportUnknownLambdaType]
+async def test_ensure_model_store_writable_takes_over_the_store_in_the_container(
+    mock_access: MagicMock, download_service: OllamaService, tmp_path: Path
+) -> None:
+    (tmp_path / "main" / "models" / "manifests" / "registry.ollama.ai" / "library").mkdir(parents=True)
+    run_command = AsyncMock()
+    download_service.docker_service = MagicMock(run_command_docker_compose=run_command)
+
+    await download_service._ensure_model_store_writable(_ref("llama3.2"), _installed_info())  # pyright: ignore[reportPrivateUsage]
+
+    assert run_command.await_count == 1
+    assert run_command.await_args.args[1:] == (  # pyright: ignore[reportOptionalMemberAccess]
+        "ollama-service",
+        ["chown", "-R", f"{os.getuid()}:{os.getgid()}", "/root/.ollama/models"],
+    )
+
+
+@pytest.mark.asyncio
+@patch("server.services.ollama_service.os.access", return_value=False)
+async def test_ensure_model_store_writable_gives_the_manual_command_when_the_container_chown_fails(
+    mock_access: MagicMock, download_service: OllamaService, tmp_path: Path
+) -> None:
+    download_service.docker_service = MagicMock(run_command_docker_compose=AsyncMock(side_effect=RuntimeError("no such container")))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await download_service._ensure_model_store_writable(_ref("llama3.2"), _installed_info())  # pyright: ignore[reportPrivateUsage]
+
+    assert exc_info.value.status_code == 500
+    assert f"sudo chown -R {os.getuid()}:{os.getgid()} {tmp_path / 'main' / 'models'}" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+@patch("server.services.ollama_service.os.access", return_value=False)
+async def test_ensure_model_store_writable_skips_without_instance_info(mock_access: MagicMock, download_service: OllamaService) -> None:
+    await download_service._ensure_model_store_writable(_ref("llama3.2"), None)  # pyright: ignore[reportPrivateUsage]
+
+    assert mock_access.call_count == 0
+
+
+@pytest.mark.asyncio
+@patch.object(OllamaService, "is_model_installed", new_callable=AsyncMock, return_value=True)
+@patch.object(OllamaService, "_download_with_registry_client", new_callable=AsyncMock)
+@patch.object(OllamaService, "_ensure_model_store_writable", new_callable=AsyncMock)
+async def test_download_offline_registry_model_ensures_the_store_is_writable_before_downloading(
+    mock_ensure: AsyncMock, mock_download: AsyncMock, mock_installed: AsyncMock, download_service: OllamaService
+) -> None:
+    info = _installed_info()
+    mock_download.side_effect = lambda *_: mock_ensure.assert_awaited_once_with(_ref("llama3.2:3b"), info)  # pyright: ignore[reportUnknownLambdaType]
+
+    await download_service._download_offline_registry_model(MagicMock(), "http://x", "llama3.2:3b", "2GB", info)  # pyright: ignore[reportPrivateUsage]
+
+    assert mock_download.await_count == 1

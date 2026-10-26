@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Ollama `mode` option: in `offline` mode Infra downloads Ollama registry models itself, so the container does not need to reach the registry.
 - `POST /v1/systemone` serves Ollama decision models (new model type `decision`); needs Ollama 0.35.0 or newer.
 - Chat completions accept `thinking_token_budget`, `chat_template_kwargs`, `repetition_detection`, `top_k`, `min_p`, `repetition_penalty`, `presence_penalty`, `frequency_penalty`, `logprobs` and `parallel_tool_calls`, passed to self-hosted backends and mesh peers only.
 - Legacy completions (`/v1/completions`) accept `thinking_token_budget`, `repetition_detection`, `top_k`, `min_p` and `repetition_penalty`, passed to self-hosted backends and mesh peers only.

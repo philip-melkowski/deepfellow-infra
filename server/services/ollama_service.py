@@ -4,12 +4,14 @@
 """Ollama service."""
 
 import asyncio
+import errno
 import hashlib
 import json
+import os
 import shutil
 import time
 from collections.abc import Sequence
-from contextlib import suppress
+from contextlib import aclosing, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal, NamedTuple, NotRequired, TypedDict
@@ -18,7 +20,7 @@ from urllib.parse import urlparse
 import aiofiles
 import aiohttp
 from fastapi import HTTPException
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, Field, StringConstraints, field_validator
 
 from server.applicationcontext import get_base_url
 from server.config import get_main_dir
@@ -76,6 +78,14 @@ from server.utils.ollama import (
     supports_gguf_quantization,
 )
 from server.utils.ollama_catalog import OllamaCatalogClient
+from server.utils.ollama_registry import (
+    OLLAMA_REGISTRY_HOST,
+    BlobLocks,
+    OllamaModelRef,
+    OllamaRegistryClient,
+    OllamaRegistryError,
+    parse_model_ref,
+)
 from server.utils.registry_client import image_without_registry_prefix, registry_for
 from server.utils.size_fetcher import fetch_ollama_ref_bytes, fmt_size
 from server.utils.vram_calculator import (
@@ -238,6 +248,13 @@ class OllamaOptions(BaseModel):
     max_loaded_models: int | None = None  # 1
     kv_cache_type: str = ""  # f16
     context_length: int | None = None  # 4096
+    mode: Literal["online", "offline"] = "online"
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _blank_mode_is_online(cls, value: object) -> object:
+        # An unset option arrives as None or a blank string from the form.
+        return "online" if value is None or value == "" else value
 
 
 class OllamaModelOptions(BaseModel):
@@ -340,6 +357,7 @@ class OllamaService(Base2Service[InstalledInfo, DownloadedInfo]):
     _installing: set[tuple[str, str]]
     _warmth_poll_tasks: dict[str, asyncio.Task[None]]
     _ps_query_failing: set[str]
+    _blob_locks: BlobLocks
 
     @property
     def _supported_gpus(self) -> list[GpuInfo]:
@@ -357,6 +375,7 @@ class OllamaService(Base2Service[InstalledInfo, DownloadedInfo]):
         self._installing = set()
         self._warmth_poll_tasks = {}
         self._ps_query_failing = set()
+        self._blob_locks = BlobLocks()
 
     def load_default_models(self, instance: str) -> None:
         """Load default models to instance (merges static catalog with dynamic overlay, restoring any installed model dropped from both)."""
@@ -451,6 +470,16 @@ class OllamaService(Base2Service[InstalledInfo, DownloadedInfo]):
                     name="context_length",
                     description="Default context length (OLLAMA_CONTEXT_LENGTH)",
                     required=False,
+                ),
+                ServiceField(
+                    type="oneof",
+                    name="mode",
+                    description="online: the Ollama container pulls models itself. "
+                    "offline: Infra downloads models from the Ollama registry, so the container does not need to reach it; "
+                    "other registries (for example hf.co) are rejected, models with a direct download URL still work",
+                    required=False,
+                    default="online",
+                    values=["online", "offline"],
                 ),
                 ServiceField(
                     type="docker-tags",
@@ -645,6 +674,52 @@ class OllamaService(Base2Service[InstalledInfo, DownloadedInfo]):
         envs["OLLAMA_NO_CLOUD"] = "1"
         return envs
 
+    def _create_model_store_dirs(self) -> None:
+        """Create the model store directories as the Infra user, so they are not created by the Docker daemon as root.
+
+        Infra writes models there in offline mode, which fails on directories owned by root when Infra does not run as root.
+        """
+        models_dir = Path(self._get_working_dir()) / "main" / "models"
+        (models_dir / "blobs").mkdir(parents=True, exist_ok=True)
+        library_dir = models_dir / "manifests" / OLLAMA_REGISTRY_HOST / "library"
+        library_dir.mkdir(parents=True, exist_ok=True)
+        # Ollama removes empty directories under manifests/ on startup and after `ollama rm`, then recreates them as root.
+        (library_dir / ".keep").touch(exist_ok=True)
+
+    def _model_store_paths_to_write(self, ref: OllamaModelRef) -> list[Path]:
+        """Return the existing directories Infra has to write to when it stores the model `ref` in the Ollama model store."""
+        models_dir = Path(self._get_working_dir()) / "main" / "models"
+        paths: list[Path] = []
+        for path in (models_dir, models_dir / "blobs", models_dir / ".infra-downloads", (models_dir / ref.manifest_path).parent):
+            while not path.exists() and path != path.parent:
+                path = path.parent
+            paths.append(path)
+        return paths
+
+    async def _ensure_model_store_writable(self, ref: OllamaModelRef, info: InstalledInfo | None) -> None:
+        """Take the model store back from root when Ollama (running as root) created directories there that Infra cannot write to.
+
+        Checked before the download, so that a permission problem does not show up only after gigabytes were downloaded. The
+        `chown` runs in the Ollama container, only when a directory is not writable: on rootless Docker the check passes and
+        the container's uid does not map to the Infra user.
+        """
+        if info is None or all(os.access(path, os.W_OK | os.X_OK) for path in self._model_store_paths_to_write(ref)):
+            return
+        models_dir = Path(self._get_working_dir()) / "main" / "models"
+        owner = f"{os.getuid()}:{os.getgid()}"
+        try:
+            compose_filepath = self.docker_service.get_docker_compose_file_path(info.docker.name)
+            await self.docker_service.run_command_docker_compose(
+                compose_filepath, info.docker.service_name, ["chown", "-R", owner, self._OLLAMA_DOCKER_ROOT + "/models"]
+            )
+        except Exception as e:
+            logger.warning("Taking over the Ollama model store %s failed: %s", models_dir, e, exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"The Ollama model store {models_dir} is not writable by Infra and changing its owner from the "
+                f"Ollama container failed: {e}. Run: sudo chown -R {owner} {models_dir}",
+            ) from e
+
     async def _validate_update_options(self, options: InstallServiceIn) -> None:
         """Normalize the hardware spec and validate the requested image_version, if any."""
         if "hardware" not in options.spec:
@@ -670,6 +745,7 @@ class OllamaService(Base2Service[InstalledInfo, DownloadedInfo]):
             self.service_downloaded = True
 
             stream.emit(StreamChunkProgress(type="progress", stage="install", value=0, data={}))
+            self._create_model_store_dirs()
             volumes = [f"{self._get_working_dir()}/main:/root/.ollama"]
             subnet = self.docker_service.get_docker_subnet()
             hardware = self.get_specified_hardware_parts(parsed_options.hardware)
@@ -1268,6 +1344,8 @@ class OllamaService(Base2Service[InstalledInfo, DownloadedInfo]):
         model_number: int,
         model_quantity: int,
         dest_path: Path | None = None,
+        offline: bool = False,
+        info: InstalledInfo | None = None,
     ) -> None:
         local_models_dir = Path(self._get_working_dir()) / "main" / "custom"
         model_path = Path(model_url)
@@ -1299,9 +1377,73 @@ class OllamaService(Base2Service[InstalledInfo, DownloadedInfo]):
 
             # Return path to file or path to directory (with model)
             input_stream.emit(StreamChunkProgress(type="progress", stage="download", value=1, data={}))
+        elif offline:
+            await self._download_offline_registry_model(input_stream, base_url, model_url, model_size, info)
         else:
             await self._download_with_ollama(input_stream, base_url, model_url, model_size)
         return
+
+    async def _download_offline_registry_model(
+        self, stream: Stream[StreamChunk], base_url: str, model_url: str, model_size: str, info: InstalledInfo | None = None
+    ) -> None:
+        """Download a model of the Ollama registry in Infra and check that the Ollama container sees it afterwards."""
+        if (ref := parse_model_ref(model_url)) is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {model_url!r} cannot be installed in offline mode: only models from the Ollama registry "
+                "(registry.ollama.ai) are downloaded by Infra. Use an online instance or a model with a downloadable file.",
+            )
+        await self._ensure_model_store_writable(ref, info)
+        await self._download_with_registry_client(stream, ref, model_size)
+        if not await self.is_model_installed(base_url, model_url):
+            raise HTTPException(
+                status_code=500,
+                detail=f"Model {model_url!r} was written to the Ollama store but Ollama does not see it; "
+                "the store layout may differ in this Ollama version.",
+            )
+
+    async def _download_with_registry_client(self, stream: Stream[StreamChunk], ref: OllamaModelRef, model_size: str) -> None:
+        """Download a registry model in Infra, straight into the Ollama model store mounted in the container.
+
+        `model_size` only seeds the progress until the registry client reports the real total. Client errors are
+        raised as `HTTPException`: registry errors keep the client's status (404 unknown model, 507 no disk space, 502
+        otherwise), local write failures give 507 (disk full) or 500.
+        """
+        client = OllamaRegistryClient(Path(self._get_working_dir()) / "main" / "models", blob_locks=self._blob_locks)
+        progress = Progress(convert_size_to_bytes(model_size) or 0)
+        last_logged_percentage = 0.0
+
+        stream.emit(StreamChunkProgress(type="progress", stage="download", value=0, data={}))
+        try:
+            async with aclosing(client.download(ref)) as packets:
+                async for packet in packets:
+                    if isinstance(packet, PreDownloadPacket):
+                        if packet.file_bytes_size:
+                            progress.set_max_value(packet.file_bytes_size)
+                    elif isinstance(packet, DownloadedPacket) and progress.max:
+                        progress.add_to_actual_value(packet.downloaded_bytes_size)
+                        percentage = progress.get_percentage()
+                        if last_logged_percentage < 1 and (percentage - last_logged_percentage >= _PROGRESS_LOG_STEP or percentage >= 1):
+                            logger.info("Downloading model %s: %.0f%%", ref.manifest_path, percentage * 100)
+                            last_logged_percentage = percentage
+                        stream.emit(StreamChunkProgress(type="progress", stage="download", value=percentage, data={}))
+        except OllamaRegistryError as e:
+            logger.warning("Downloading model %s from the Ollama registry failed: %s", ref.manifest_path, e.message)
+            raise HTTPException(status_code=e.status_code, detail=e.message) from e
+        except OSError as e:
+            logger.warning("Writing model %s to the Ollama store failed: %s", ref.manifest_path, e, exc_info=True)
+            no_space = e.errno == errno.ENOSPC
+            hint = (
+                f" Run: sudo chown -R {os.getuid()}:{os.getgid()} {Path(self._get_working_dir()) / 'main' / 'models'}"
+                if e.errno == errno.EACCES
+                else ""
+            )
+            raise HTTPException(
+                status_code=507 if no_space else 500,
+                detail=f"Cannot write the model to the Ollama store: {e}.{hint}",
+            ) from e
+
+        stream.emit(StreamChunkProgress(type="progress", stage="download", value=1, data={}))
 
     def _get_local_modelfile_path(self, model: str, instance: str) -> Path:
         """Return local (host) modelfile path."""
@@ -1353,11 +1495,15 @@ class OllamaService(Base2Service[InstalledInfo, DownloadedInfo]):
         i: int = 1,
         models_quantity: int = 1,
         dest_path: Path | None = None,
+        offline: bool = False,
+        info: InstalledInfo | None = None,
     ) -> None:
         if model_id not in self.models_download_progress:
             self.models_download_progress[model_id] = input_stream
             try:
-                await self._download_with_downloader(input_stream, base_url, model_url, model_id, size, i, models_quantity, dest_path)
+                await self._download_with_downloader(
+                    input_stream, base_url, model_url, model_id, size, i, models_quantity, dest_path, offline, info=info
+                )
             finally:
                 del self.models_download_progress[model_id]
         else:
@@ -1436,7 +1582,15 @@ class OllamaService(Base2Service[InstalledInfo, DownloadedInfo]):
                         model_to_download = line.value
                         if not await self.is_model_installed(instance_info.base_url, model_to_download):
                             await self._download_model_or_set_progress(
-                                input_stream, instance_info.base_url, model_to_download, model_id, model.size, 0, 1
+                                input_stream,
+                                instance_info.base_url,
+                                model_to_download,
+                                model_id,
+                                model.size,
+                                0,
+                                1,
+                                offline=instance_info.parsed_options.mode == "offline",
+                                info=instance_info,
                             )
             modelfile_path = await self.save_modelfile(model_id, instance_info.instance_name, modelfile.render())
             await self.create_model_from_modelfile(instance_info, internal_model_name, modelfile_path, model.quantization)
@@ -1563,7 +1717,15 @@ class OllamaService(Base2Service[InstalledInfo, DownloadedInfo]):
 
                 else:
                     if not await self.is_model_installed(info.base_url, model_id):
-                        await self._download_model_or_set_progress(input_stream, info.base_url, model.id, model.id, model.size)
+                        await self._download_model_or_set_progress(
+                            input_stream,
+                            info.base_url,
+                            model.id,
+                            model.id,
+                            model.size,
+                            offline=info.parsed_options.mode == "offline",
+                            info=info,
+                        )
 
                 input_stream.emit(StreamChunkProgress(type="progress", stage="install", value=0, data={}))
 
