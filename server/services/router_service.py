@@ -17,7 +17,7 @@ from starlette.requests import Request
 from starlette.responses import Response as StarletteResponse
 
 from server.endpointregistry import ChatCompletionEndpoint, RegistrationOptions
-from server.models.api import ChatCompletionRequest, EmbeddingRequest, ModelProps
+from server.models.api import ChatCompletionRequest, EmbeddingRequest, ModelProps, SystemOneNoulQuestion, SystemOneRequest
 from server.models.models import (
     CustomModelSpecification,
     InstallModelIn,
@@ -39,6 +39,7 @@ from server.models.services import (
     UninstallServiceIn,
 )
 from server.router.config import RouterOptions
+from server.router.decider import Decider
 from server.router.engine import RouterEngine
 from server.router.heuristics import HeuristicScorer
 from server.router.index import KnnIndex
@@ -134,6 +135,12 @@ class RouterService(Base2Service[RouterInstalledInfo, RouterDownloadedInfo]):
                     default="2",
                 ),
                 ServiceField(
+                    type="text",
+                    name="decider_path",
+                    description="Path to the JSON parameters of the layer 3 decision model (empty disables it)",
+                    required=False,
+                ),
+                ServiceField(
                     type="number", name="force_large_over_chars", description="Rule: large model above this prompt length", required=False
                 ),
                 ServiceField(
@@ -176,16 +183,25 @@ class RouterService(Base2Service[RouterInstalledInfo, RouterDownloadedInfo]):
             custom=custom,
         )
 
-    async def _embed(self, options: RouterOptions, text: str) -> list[float]:
-        response = await self.endpoint_registry.execute_embeddings(EmbeddingRequest(model=options.embedding_model, input=text))
+    @staticmethod
+    async def _read_json(response: StarletteResponse, what: str) -> Any:  # noqa: ANN401
         if isinstance(response, StreamingResponse):
             raw = b"".join([chunk.encode() if isinstance(chunk, str) else bytes(chunk) async for chunk in response.body_iterator])
         else:
             raw = bytes(response.body)
         if response.status_code != 200:
-            msg = f"embedding request failed with HTTP {response.status_code}"
+            msg = f"{what} request failed with HTTP {response.status_code}"
             raise RuntimeError(msg)
-        return [float(x) for x in json.loads(raw)["data"][0]["embedding"]]
+        return json.loads(raw)
+
+    async def _embed(self, options: RouterOptions, text: str) -> list[float]:
+        response = await self.endpoint_registry.execute_embeddings(EmbeddingRequest(model=options.embedding_model, input=text))
+        return [float(x) for x in (await self._read_json(response, "embedding"))["data"][0]["embedding"]]
+
+    async def _ask_decision_model(self, model: str, prompt: str, questions: dict[str, SystemOneNoulQuestion]) -> dict[str, float]:
+        body = SystemOneRequest(model=model, state=prompt, questions=dict(questions))
+        answers = (await self._read_json(await self.endpoint_registry.execute_systemone(body), "decision model"))["answers"]
+        return {name: float(answers[name]["noul"]) for name in questions}
 
     async def _install_instance(
         self,
@@ -211,7 +227,14 @@ class RouterService(Base2Service[RouterInstalledInfo, RouterDownloadedInfo]):
             except (OSError, ValueError, KeyError, TypeError) as e:
                 raise HTTPException(400, f"Cannot load the router heuristics {parsed.heuristics_path!r}: {e}") from e
 
-        engine = RouterEngine(parsed, index, lambda text: self._embed(parsed, text), heuristics)
+        decider: Decider | None = None
+        if parsed.decider_path:
+            try:
+                decider = await asyncio.to_thread(Decider.load, parsed.decider_path, self._ask_decision_model)
+            except (OSError, ValueError) as e:
+                raise HTTPException(400, f"Cannot load the router decision model parameters {parsed.decider_path!r}: {e}") from e
+
+        engine = RouterEngine(parsed, index, lambda text: self._embed(parsed, text), heuristics, decider)
 
         async def func(stream: Stream[StreamChunk]) -> RouterInstalledInfo:  # noqa: ARG001
             self.service_downloaded = True
@@ -263,6 +286,8 @@ class RouterService(Base2Service[RouterInstalledInfo, RouterDownloadedInfo]):
             final.headers["X-Router-Layer"] = decision.layer
             if decision.score is not None:
                 final.headers["X-Router-Score"] = f"{decision.score:.4f}"
+            if decision.decider_score is not None:
+                final.headers["X-Router-Decider-Score"] = f"{decision.decider_score:.4f}"
             if not isinstance(final, StreamingResponse):
                 raise HTTPException(500, "Unexpected non-streaming response from the routed model")
             return final

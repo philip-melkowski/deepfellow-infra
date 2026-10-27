@@ -33,6 +33,9 @@ class RouterOptions(BaseModel):
         str | None, Field(description="Path to the JSON parameters of the layer 1 heuristics (None disables them)")
     ] = None
     heuristic_threshold: Annotated[float, Field(description="Heuristic points from which the prompt goes to the large model")] = 2.0
+    decider_path: Annotated[
+        str | None, Field(description="Path to the JSON parameters of the layer 3 decision model (None disables it)")
+    ] = None
     rules: RouterRules = RouterRules()
 
     @classmethod

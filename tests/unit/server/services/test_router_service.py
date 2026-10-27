@@ -368,3 +368,62 @@ async def test_handler_sends_prompt_over_heuristic_threshold_to_large_without_em
     assert response.headers["X-Router-Layer"] == "heuristics"
     assert response.headers["X-Router-Model"] == "large"
     registry.execute_embeddings.assert_not_called()
+
+
+def _decider_file(tmp_path: Path) -> str:
+    path = tmp_path / "l3.json"
+    params = {
+        "model": "decider",
+        "questions": {"hard": {"type": "noul", "instructions": "Is it hard?"}},
+        "intercept": 0.0,
+        "knn_weight": 1.0,
+        "weights": {"hard": 1.0},
+        "zone_low": 0.4,
+        "zone_high": 0.6,
+    }
+    path.write_text(json.dumps(params), encoding="utf-8")
+    return str(path)
+
+
+@pytest.mark.asyncio
+async def test_install_instance_rejects_bad_decider_params(svc: RouterService, index_path: str, tmp_path: Path) -> None:
+    with pytest.raises(HTTPException, match="Cannot load the router decision model parameters") as e:
+        await svc._install_instance("default", _spec(index_path, decider_path=str(tmp_path / "nope.json")))  # pyright: ignore[reportPrivateUsage]
+    assert e.value.status_code == 400
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"model": "decider"}), encoding="utf-8")
+    with pytest.raises(HTTPException, match="Cannot load the router decision model parameters"):
+        await svc._install_instance("default", _spec(index_path, decider_path=str(bad)))  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_handler_asks_decision_model_in_the_uncertainty_zone(
+    svc: RouterService, registry: MagicMock, index_path: str, tmp_path: Path
+) -> None:
+    await _installed(svc, index_path, decider_path=_decider_file(tmp_path))
+    await (await svc._install_model("default", ROUTER_MODEL_ID, InstallModelIn(spec={}))).wait()  # pyright: ignore[reportPrivateUsage]
+    registry.execute_embeddings = AsyncMock(return_value=_embedding([1.0, 1.0]))
+    registry.execute_systemone = AsyncMock(return_value=_json_response({"answers": {"hard": {"type": "noul", "noul": 0.95}}}))
+    registry.execute_chat_completion = AsyncMock(side_effect=_echo_model)
+    handler = registry.register_chat_completion.call_args.kwargs["endpoint"].on_chat_completion
+    response = await handler(_request("tricky"), None)
+    assert response.headers["X-Router-Layer"] == "decider"
+    assert response.headers["X-Router-Model"] == "large"
+    assert float(response.headers["X-Router-Decider-Score"]) > 0.5
+    body = registry.execute_systemone.call_args.args[0]
+    assert (body.model, body.state, list(body.questions)) == ("decider", "tricky", ["hard"])
+
+
+@pytest.mark.asyncio
+async def test_handler_falls_back_to_large_when_decision_model_errors(
+    svc: RouterService, registry: MagicMock, index_path: str, tmp_path: Path
+) -> None:
+    await _installed(svc, index_path, decider_path=_decider_file(tmp_path))
+    await (await svc._install_model("default", ROUTER_MODEL_ID, InstallModelIn(spec={}))).wait()  # pyright: ignore[reportPrivateUsage]
+    registry.execute_embeddings = AsyncMock(return_value=_embedding([1.0, 1.0]))
+    registry.execute_systemone = AsyncMock(return_value=Response(status_code=503, content=b"{}"))
+    registry.execute_chat_completion = AsyncMock(side_effect=_echo_model)
+    handler = registry.register_chat_completion.call_args.kwargs["endpoint"].on_chat_completion
+    response = await handler(_request("tricky"), None)
+    assert response.headers["X-Router-Layer"] == "fallback"
+    assert response.headers["X-Router-Model"] == "large"
