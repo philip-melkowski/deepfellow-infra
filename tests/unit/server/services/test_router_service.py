@@ -41,6 +41,7 @@ def svc(registry: MagicMock) -> RouterService:
         "model_downloader": MagicMock(),
         "docker_service": MagicMock(),
         "hardware": MagicMock(gpus=[]),
+        "services_manager": MagicMock(),
     }
     return RouterService(**deps)
 

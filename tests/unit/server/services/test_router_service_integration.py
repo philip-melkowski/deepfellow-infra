@@ -77,7 +77,7 @@ async def _router(registry: EndpointRegistry, tmp_path: Path) -> RouterService:
         vectors=np.array([[1.0, 0.0], [0.9, 0.1], [0.0, 1.0], [0.1, 0.9]], dtype=np.float32),
         labels=np.array([0.0, 0.0, 1.0, 1.0], dtype=np.float32),
     )
-    svc = RouterService(MagicMock(), registry, MagicMock(), MagicMock(), MagicMock(), MagicMock(gpus=[]))
+    svc = RouterService(MagicMock(), registry, MagicMock(), MagicMock(), MagicMock(), MagicMock(gpus=[]), MagicMock())
     options = InstallServiceIn(spec={"small_model": "small", "large_model": "large", "index_path": str(path), "k": "2", "threshold": "0.5"})
     svc.instances_info["default"].installed = await (await svc._install_instance("default", options)).wait()  # pyright: ignore[reportPrivateUsage]
     await (await svc._install_model("default", "router", InstallModelIn(spec={}))).wait()  # pyright: ignore[reportPrivateUsage]

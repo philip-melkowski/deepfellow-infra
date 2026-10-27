@@ -187,7 +187,12 @@ class RouterService(Base2Service[RouterInstalledInfo, RouterDownloadedInfo]):
             raise RuntimeError(msg)
         return [float(x) for x in json.loads(raw)["data"][0]["embedding"]]
 
-    async def _install_instance(self, instance: str, options: InstallServiceIn) -> PromiseWithProgress[RouterInstalledInfo, StreamChunk]:  # noqa: ARG002
+    async def _install_instance(
+        self,
+        instance: str,  # noqa: ARG002
+        options: InstallServiceIn,
+        container_name_override: str | None = None,  # noqa: ARG002
+    ) -> PromiseWithProgress[RouterInstalledInfo, StreamChunk]:
         try:
             parsed = RouterOptions.from_spec(options.spec)
         except ValidationError as e:
@@ -265,7 +270,11 @@ class RouterService(Base2Service[RouterInstalledInfo, RouterDownloadedInfo]):
         return on_chat_completion
 
     async def _install_model(
-        self, instance: str, model_id: str, options: InstallModelIn
+        self,
+        instance: str,
+        model_id: str,
+        options: InstallModelIn,
+        container_name_override: str | None = None,  # noqa: ARG002
     ) -> PromiseWithProgress[InstallModelOut, StreamChunk]:
         if model_id != ROUTER_MODEL_ID:
             raise HTTPException(400, "Model not found")
