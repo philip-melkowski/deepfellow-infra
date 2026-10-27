@@ -4,7 +4,7 @@
 """Integration tests: tag selection against the live registries (GHCR, Docker Hub) and the host's NVIDIA driver.
 
 They need network access (and Docker with a GPU for the CUDA check), so they are skipped unless
-`DF_TEST_LIVE_REGISTRIES=1` is set. Run them with `just test-live`. They catch what the snapshot-based unit
+`DF_TEST_INTEGRATION_REGISTRIES=1` is set. Run them with `just test-integration`. They catch what the snapshot-based unit
 tests cannot: a registry changing its tag format or listing, or a pinned default image being removed.
 """
 
@@ -22,7 +22,7 @@ from server.utils.hardware import get_nvidia_max_cuda_version
 from server.utils.registry_client import image_without_registry_prefix, registry_for
 
 pytestmark = [
-    pytest.mark.skipif(os.environ.get("DF_TEST_LIVE_REGISTRIES") != "1", reason="set DF_TEST_LIVE_REGISTRIES=1 to run"),
+    pytest.mark.skipif(os.environ.get("DF_TEST_INTEGRATION_REGISTRIES") != "1", reason="set DF_TEST_INTEGRATION_REGISTRIES=1 to run"),
 ]
 
 PINNED_IMAGES = {

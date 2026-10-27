@@ -288,7 +288,7 @@ deploy_to_dev:
     name: dev
     url: https://dfinfra.test.simplito.com/
 
-# Read-only smoke suite against the deployed instance (see tests/bruno/README.md).
+# Read-only smoke suite against the deployed instance (see tests/smoke/README.md).
 # Runs after every deploy_to_dev. On a tag the stage order (deploy -> smoke-test
 # -> release) makes it the blocking gate for push_to_github; the version
 # assertion applies to tags only.
@@ -328,12 +328,12 @@ smoke-test:
       # Bruno reads {{process.env.X}} from the collection's .env file only; it
       # does not inherit exported shell variables.
       umask 077
-      cat > tests/bruno/.env <<EOF
+      cat > tests/smoke/.env <<EOF
       API_TOKEN=$DF_INFRA_API_KEY
       ADMIN_TOKEN=$DF_INFRA_ADMIN_API_KEY
       EXPECTED_VERSION=${SMOKE_EXPECTED_TAG#v}
       EOF
-    - cd tests/bruno  # bru only runs from a collection root; -r descends into smoke/ and auth/
+    - cd tests/smoke  # bru only runs from a collection root; -r descends into smoke/ and auth/
     - >
       bru run . -r
       --env-var host="$DF_SMOKE_URL"

@@ -6,7 +6,7 @@
 `data/real_docker_tags.json` holds a trimmed copy of the lists Infra's registry client returned (GHCR and Docker
 Hub, 2026-10-13), before the services' `filter_docker_tags`: about 200 tags, enough to cover every variant the
 tests use (see `_note` in the file). Tests use them so tag selection is checked against real tag formats, not
-invented ones. To refresh, save `get_tags()` output for each image and trim it the same way; `just test-live`
+invented ones. To refresh, save `get_tags()` output for each image and trim it the same way; `just test-integration`
 checks the full, live lists.
 """
 

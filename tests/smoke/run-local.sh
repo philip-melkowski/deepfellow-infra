@@ -9,9 +9,9 @@
 # If a server is already listening on :8086 it is reused and left running.
 #
 # Usage:
-#   tests/bruno/run-local.sh                 # run the whole collection
-#   tests/bruno/run-local.sh smoke           # run only the smoke/ folder
-#   tests/bruno/run-local.sh --reporter-junit results.xml
+#   tests/smoke/run-local.sh                 # run the whole collection
+#   tests/smoke/run-local.sh smoke           # run only the smoke/ folder
+#   tests/smoke/run-local.sh --reporter-junit results.xml
 #
 # Any extra arguments are forwarded to `bru run`.
 

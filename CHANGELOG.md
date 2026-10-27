@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `/admin/config` limits `max_generated_tokens`, `max_context_tokens`, `max_choices`, `max_top_k`.
 - vLLM speech-to-text (`stt`) models such as Whisper, served on `/v1/audio/transcriptions`.
 - vLLM catalog now lists 50 speech-to-text models, and the catalog refresh fetches them from HuggingFace.
+- `just test-unit`, `just test-e2e` and `just test-smoke` commands.
 
 ### Changed
 
@@ -27,6 +28,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Breaking:** Ollama `/api/chat` ignores `options` such as `num_gpu` instead of forwarding them.
 - Ollama `/api/chat` `options` now have bounds, e.g. `num_ctx` < 1 or `temperature` > 2 gets a 400.
 - Ollama `/api/chat` without a positive `num_predict` stops at `max_generated_tokens`.
+- `just test-live` renamed to `just test-integration`; `DF_TEST_LIVE_REGISTRIES` to `DF_TEST_INTEGRATION_REGISTRIES`.
+- Bruno smoke tests moved to `tests/smoke`.
 
 ### Fixed
 
