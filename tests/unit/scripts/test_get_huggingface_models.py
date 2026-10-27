@@ -1673,6 +1673,78 @@ async def test_fetch_registry_entries_raises_without_any_active_criterion() -> N
         await fetch_registry_entries(session, 0, 0, 0, "llm", log=lambda _msg: None)
 
 
+@pytest.mark.asyncio
+async def test_collect_embedding_models_keeps_gguf_tagged_repo_with_native_weights() -> None:
+    multi_format = {"id": "mixedbread-ai/mxbai-embed-large-v1", "tags": ["gguf"]}
+    gguf_only = {"id": "org/bge-small-GGUF", "tags": ["gguf"]}
+    details = {
+        "mixedbread-ai/mxbai-embed-large-v1": {**multi_format, "siblings": [{"rfilename": "model.safetensors"}]},
+        "org/bge-small-GGUF": {**gguf_only, "siblings": [{"rfilename": "bge-small.Q4_K_M.gguf"}]},
+    }
+
+    async def fake_name_fetch(session: Mock, sort: str, limit: int):
+        return [multi_format, gguf_only]
+
+    async def fake_detail(session: Mock, model_id: str, **kwargs: object):
+        return details[model_id]
+
+    with (
+        patch("scripts.get_huggingface_models.fetch_popular_models", side_effect=_no_tag_candidates),
+        patch("scripts.get_huggingface_models.fetch_popular_embedding_models", side_effect=fake_name_fetch),
+        patch("scripts.get_huggingface_models.get_model_detail_cached", side_effect=fake_detail),
+    ):
+        result = await collect_embedding_models(MagicMock(), {"downloads": 10})
+
+    assert [m["id"] for m in result] == ["mixedbread-ai/mxbai-embed-large-v1"]
+
+
+@pytest.mark.asyncio
+async def test_collect_llm_models_keeps_gguf_tagged_repo_with_native_weights() -> None:
+    multi_format = {"id": "org/llama", "tags": ["gguf"]}
+    detail = {**multi_format, "siblings": [{"rfilename": "model-00001-of-00002.safetensors"}]}
+
+    async def fake_fetch(session: Mock, tag: str, sort: str, limit: int):
+        return [multi_format]
+
+    with (
+        patch("scripts.get_huggingface_models.fetch_popular_models", side_effect=fake_fetch),
+        patch("scripts.get_huggingface_models.get_model_detail_cached", return_value=detail) as detail_mock,
+    ):
+        result = await collect_llm_models(MagicMock(), {"downloads": 10, "likes": 10})
+
+    assert [m["id"] for m in result] == ["org/llama"]
+    assert detail_mock.await_count == 1  # fetched once per unique candidate, not per sort/tag combination
+
+
+@pytest.mark.asyncio
+async def test_collect_llm_models_drops_gguf_named_repo_without_fetching_details() -> None:
+    async def fake_fetch(session: Mock, tag: str, sort: str, limit: int):
+        return [{"id": "org/llama-GGUF", "tags": ["gguf"]}, {"id": "org/plain"}]
+
+    with (
+        patch("scripts.get_huggingface_models.fetch_popular_models", side_effect=fake_fetch),
+        patch("scripts.get_huggingface_models.get_model_detail_cached") as detail_mock,
+    ):
+        result = await collect_llm_models(MagicMock(), {"downloads": 10})
+
+    assert [m["id"] for m in result] == ["org/plain"]
+    detail_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_collect_llm_models_drops_gguf_candidate_when_detail_fetch_fails() -> None:
+    async def fake_fetch(session: Mock, tag: str, sort: str, limit: int):
+        return [{"id": "org/llama", "tags": ["gguf"]}, {"id": "org/plain"}]
+
+    with (
+        patch("scripts.get_huggingface_models.fetch_popular_models", side_effect=fake_fetch),
+        patch("scripts.get_huggingface_models.get_model_detail_cached", side_effect=aiohttp.ClientError("boom")),
+    ):
+        result = await collect_llm_models(MagicMock(), {"downloads": 10})
+
+    assert [m["id"] for m in result] == ["org/plain"]
+
+
 def test_is_supported_stt_accepts_whisper_and_rejects_ctc() -> None:
     assert is_supported_stt(["WhisperForConditionalGeneration"])
     assert not is_supported_stt(["Wav2Vec2ForCTC"])

@@ -68,8 +68,23 @@ def test_fmt_size_compact(input_val: str, expected: str) -> None:
         ({"id": "org/model", "tags": ["gguf"]}, True),
         ({"id": "org/model"}, False),
         ({}, False),
+        ({"id": "org/model", "tags": ["gguf"], "siblings": [{"rfilename": "model.safetensors"}, {"rfilename": "gguf/model.gguf"}]}, False),
+        ({"id": "org/model", "tags": ["gguf"], "siblings": [{"rfilename": "model.safetensors.index.json"}]}, False),
+        ({"id": "org/model", "tags": ["gguf"], "siblings": [{"rfilename": "pytorch_model.bin"}]}, False),
+        ({"id": "org/model-GGUF", "tags": ["gguf"], "siblings": [{"rfilename": "model-Q4_K_M.gguf"}, {"rfilename": "README.md"}]}, True),
+        ({"id": "org/model-GGUF", "tags": ["gguf"], "siblings": [{"rfilename": "onnx/model.safetensors"}]}, True),
     ],
-    ids=["gguf_in_name", "gguf_tag", "no_gguf", "missing_id"],
+    ids=[
+        "gguf_in_name",
+        "gguf_tag",
+        "no_gguf",
+        "missing_id",
+        "mixed_safetensors",
+        "mixed_safetensors_index",
+        "mixed_pytorch_bin",
+        "gguf_only_repo",
+        "nested_weights_ignored",
+    ],
 )
 def test_is_gguf(model_data: dict[str, object], expected: bool) -> None:
     assert is_gguf(model_data) is expected
