@@ -15,6 +15,10 @@ All Python commands use `uv` via `just`. Run from the project root.
 | `just dev` | Start backend (localhost:8086, hot-reload, debug logging) |
 | `just test [FLAGS]` | Run pytest with coverage |
 | `just ntest [FLAGS]` | Same but parallel (`-n auto`) |
+| `just test-unit [FLAGS]` | Run only `tests/unit` with coverage |
+| `just test-integration [FLAGS]` | Run `tests/integration` (registry tests, `DF_TEST_INTEGRATION_REGISTRIES=1`) |
+| `just test-e2e [FLAGS]` | Run `tests/e2e` (`DF_TEST_E2E=1`) — exits non-zero until the first test lands (no tests collected) |
+| `just test-smoke [FLAGS]` | Run `tests/smoke/run-local.sh` |
 | `just check` | Full lint suite: license headers, ruff, ruff-format, pyright, auth checks, example.env check |
 | `just ruff` | Lint Python files |
 | `just ruff-format` | Format Python files |
@@ -58,6 +62,8 @@ WebUI (from `webui/` directory):
 - Tests load `.test.env` — create from `example.env` if missing
 - Single test: `just test -k 'test_name'`
 - Coverage covers `server/` and `scripts/`
+- For ordinary code changes run `just test` (or `just test-unit`); integration, e2e and smoke suites are opt-in and not needed unless the change targets them
+- `just test-e2e` currently exits non-zero because `tests/e2e` has no tests yet — this is expected, don't investigate it
 
 **WebUI (TypeScript):**
 - Framework: Vitest — installed automatically with `npm install` (it's in `devDependencies`)

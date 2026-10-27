@@ -35,8 +35,8 @@ tears it back down:
 
 ```bash
 npm install -g @usebruno/cli@4.0.0   # once — same version CI pins
-tests/bruno/run-local.sh             # whole suite
-tests/bruno/run-local.sh smoke       # just the smoke/ folder
+tests/smoke/run-local.sh             # whole suite
+tests/smoke/run-local.sh smoke       # just the smoke/ folder
 ```
 
 The version is pinned so a new Bruno release can't change CLI behaviour under
@@ -59,7 +59,7 @@ is meaningful locally too.
 
 ```bash
 export API_TOKEN=... ADMIN_TOKEN=...
-bru run tests/bruno --env-var host=https://dfinfra.test.simplito.com
+bru run tests/smoke --env-var host=https://dfinfra.test.simplito.com
 ```
 
 Set `EXPECTED_VERSION` as well to assert a specific released version; leave it

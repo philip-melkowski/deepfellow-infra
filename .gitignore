@@ -69,5 +69,5 @@ memory
 .claude/skills/review-mr
 
 # Bruno smoke tests — local auth tokens
-/tests/bruno/.env
+/tests/smoke/.env
 .claude/skills/sync-release
