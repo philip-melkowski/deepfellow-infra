@@ -33,6 +33,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `$` in a service's command, entrypoint and healthcheck now reaches the container as typed.
 - Ollama catalog refresh fills in sizes ollama.com shows as a range (e.g. decision models, `gemma4`).
 - 5xx responses from local models and streams broken off by the model count as errors in `deepfellow_requests_total` and `deepfellow_request_errors_total` (5xx as `error_type="http_5xx"`), so the error rate on dashboards goes up.
+- Custom vLLM models whose HuggingFace repo also ships a GGUF variant (e.g. `mixedbread-ai/mxbai-embed-large-v1`) are no longer rejected as GGUF, and are no longer dropped from the model catalog.
 
 ## [0.36.0] - 2026-10-21
 

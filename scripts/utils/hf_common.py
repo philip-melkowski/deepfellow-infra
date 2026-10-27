@@ -130,8 +130,28 @@ async def get_model_detail_cached(
     return data
 
 
+def _has_native_weights(siblings: list[dict[str, Any]]) -> bool:
+    """Return True if the repo root holds weights vLLM can load directly (safetensors or PyTorch `.bin`)."""
+    for f in siblings:
+        filename = f.get("rfilename", "").lower()
+        if "/" in filename:
+            continue  # only the repo root counts - a nested gguf/ or onnx/ folder is not what the engine loads
+        if filename.endswith((".safetensors", ".safetensors.index.json")) or (
+            filename.startswith("pytorch_model") and filename.endswith(".bin")
+        ):
+            return True
+    return False
+
+
 def is_gguf(model: dict[str, Any]) -> bool:
-    """Return True if the model repo looks like a GGUF (quantized) repo."""
+    """Return True if the model repo looks like a GGUF (quantized) repo.
+
+    Repos that also ship native weights at their root (multi-format repos such as mixedbread-ai/mxbai-embed-large-v1)
+    are not GGUF-only, even if they carry the "gguf" tag. When the payload has no file list (e.g. search results),
+    this falls back to the name/tag check alone.
+    """
+    if _has_native_weights(model.get("siblings") or []):
+        return False
     name = model.get("id", "").lower()
     tags = [t.lower() for t in model.get("tags", [])]
     return "gguf" in name or "gguf" in tags

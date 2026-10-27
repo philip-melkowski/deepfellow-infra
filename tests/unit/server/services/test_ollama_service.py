@@ -81,9 +81,10 @@ def _make_model_installed_info(model_id: str = "my-llm", registration_id: str = 
 
 
 @pytest.fixture
-def deps() -> dict[str, Any]:
+def deps(tmp_path: Path) -> dict[str, Any]:
     config = MagicMock()
     config.ollama_vram_overhead_factor = 1.0
+    config.get_storage_services_dir.return_value = tmp_path  # instance install creates the model store dirs on disk
     return {
         "config": config,
         "endpoint_registry": MagicMock(),

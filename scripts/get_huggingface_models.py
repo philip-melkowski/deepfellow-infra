@@ -482,6 +482,34 @@ async def fetch_popular_embedding_models(session: aiohttp.ClientSession, sort: s
     return await get_json_with_retry(session, f"{HF_API}/models", params)
 
 
+async def _is_gguf_resolved(session: aiohttp.ClientSession, model: dict[str, Any], sem: asyncio.Semaphore) -> bool:
+    """Return True if the search-result `model` is a GGUF repo, checking the repo's file list when only the tag flags it.
+
+    Search results carry no file list, so `is_gguf` alone would reject multi-format repos that ship native weights next
+    to a GGUF variant (e.g. mixedbread-ai/mxbai-embed-large-v1). Repos with "gguf" in their name are almost always
+    GGUF-only, so they are dropped without a request; only tag-only candidates are fetched, and the detail fetch is
+    disk-cached. If it fails, the model stays classified as GGUF (the safe, previous behaviour).
+    """
+    if not is_gguf(model):
+        return False
+    if "gguf" in model.get("id", "").lower():
+        return True
+    async with sem:
+        try:
+            data = await get_model_detail_cached(session, model["id"], cache_dir=DEFAULT_MODEL_DETAIL_CACHE_DIR)
+        except Exception:
+            logger.warning("Failed to fetch details for %s to verify GGUF status; treating it as GGUF", model["id"], exc_info=True)
+            return True
+    return is_gguf(data)
+
+
+async def _drop_gguf_models(session: aiohttp.ClientSession, models: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop GGUF-only repos from the deduplicated candidates, keeping their order."""
+    sem = asyncio.Semaphore(CONCURRENCY)
+    flags = await asyncio.gather(*[_is_gguf_resolved(session, m, sem) for m in models])
+    return [m for m, gguf in zip(models, flags, strict=True) if not gguf]
+
+
 async def collect_llm_models(session: aiohttp.ClientSession, active: dict[str, int]) -> list[dict[str, Any]]:
     """Fetch and deduplicate LLM models across all sort/tag combinations."""
     fetch_tasks = [fetch_popular_models(session, tag, sort, limit) for sort, limit in active.items() for tag in LLM_TAGS]
@@ -491,10 +519,10 @@ async def collect_llm_models(session: aiohttp.ClientSession, active: dict[str, i
     for batch in results:
         for m in batch:
             mid = m["id"]
-            if mid not in seen and is_llm(m) and not is_gguf(m) and not is_test_fixture(m) and not is_mlx(m):
+            if mid not in seen and is_llm(m) and not is_test_fixture(m) and not is_mlx(m):
                 seen.add(mid)
                 models.append(m)
-    return models
+    return await _drop_gguf_models(session, models)
 
 
 async def collect_stt_models(
@@ -558,7 +586,7 @@ async def _collect_by_tag_and_name(
 
     def add(m: dict[str, Any]) -> None:
         mid = m["id"]
-        if mid not in seen and not is_gguf(m):
+        if mid not in seen:
             seen.add(mid)
             models.append(m)
 
@@ -570,7 +598,7 @@ async def _collect_by_tag_and_name(
         for m in batch:
             if is_named_match(m):
                 add(m)
-    return models
+    return await _drop_gguf_models(session, models)
 
 
 async def collect_reranker_models(session: aiohttp.ClientSession, active: dict[str, int]) -> list[dict[str, Any]]:
