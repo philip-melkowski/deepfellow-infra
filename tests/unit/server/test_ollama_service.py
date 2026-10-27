@@ -1183,6 +1183,16 @@ def test_create_model_store_dirs_keeps_existing_content(download_service: Ollama
     assert blob.read_bytes() == b"x"
 
 
+@patch("server.services.ollama_service.Path.touch", side_effect=PermissionError(13, "Permission denied"))
+def test_create_model_store_dirs_does_not_fail_on_a_store_owned_by_root(
+    mock_touch: MagicMock, download_service: OllamaService, tmp_path: Path
+) -> None:
+    download_service._create_model_store_dirs()  # pyright: ignore[reportPrivateUsage]
+
+    assert mock_touch.called
+    assert (tmp_path / "main" / "models" / "blobs").is_dir()
+
+
 def _installed_info() -> InstalledInfo:
     info = MagicMock(spec=InstalledInfo)
     info.docker = MagicMock()

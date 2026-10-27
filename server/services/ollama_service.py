@@ -678,13 +678,18 @@ class OllamaService(Base2Service[InstalledInfo, DownloadedInfo]):
         """Create the model store directories as the Infra user, so they are not created by the Docker daemon as root.
 
         Infra writes models there in offline mode, which fails on directories owned by root when Infra does not run as root.
+        A store left owned by root by an earlier install does not fail the install: `_ensure_model_store_writable` takes it
+        over before a model download.
         """
         models_dir = Path(self._get_working_dir()) / "main" / "models"
-        (models_dir / "blobs").mkdir(parents=True, exist_ok=True)
         library_dir = models_dir / "manifests" / OLLAMA_REGISTRY_HOST / "library"
-        library_dir.mkdir(parents=True, exist_ok=True)
-        # Ollama removes empty directories under manifests/ on startup and after `ollama rm`, then recreates them as root.
-        (library_dir / ".keep").touch(exist_ok=True)
+        try:
+            (models_dir / "blobs").mkdir(parents=True, exist_ok=True)
+            library_dir.mkdir(parents=True, exist_ok=True)
+            # Ollama removes empty directories under manifests/ on startup and after `ollama rm`, then recreates them as root.
+            (library_dir / ".keep").touch(exist_ok=True)
+        except PermissionError as e:
+            logger.warning("Cannot prepare the Ollama model store %s, it is probably owned by root: %s", models_dir, e)
 
     def _model_store_paths_to_write(self, ref: OllamaModelRef) -> list[Path]:
         """Return the existing directories Infra has to write to when it stores the model `ref` in the Ollama model store."""
