@@ -4,6 +4,7 @@
 """Router decision engine: rules and heuristics (layer 1), kNN on embeddings (layer 2), a decision model (layer 3), safe fallback."""
 
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Literal
@@ -45,16 +46,16 @@ class RouterEngine:
         self._embed = embed
         self._heuristics = heuristics
         self._decider = decider
-        self._keywords = [w.lower() for w in options.rules.force_large_keywords]
+        self._keywords = [(w, re.compile(rf"\b{re.escape(w.lower())}\b")) for w in options.rules.force_large_keywords]
 
     def _rule(self, prompt: str) -> str | None:
         rules = self._options.rules
         if rules.force_large_over_chars is not None and len(prompt) > rules.force_large_over_chars:
             return f"prompt longer than {rules.force_large_over_chars} characters"
         lowered = prompt.lower()
-        for word in self._keywords:
-            if word in lowered:
-                return f"keyword {word!r}"
+        for word, pattern in self._keywords:
+            if pattern.search(lowered):
+                return f"keyword {word.lower()!r}"
         return None
 
     async def decide(self, prompt: str) -> RouterDecision:

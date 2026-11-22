@@ -242,3 +242,17 @@ async def test_engine_falls_back_when_heuristics_fail() -> None:
     decision = await RouterEngine(_options(), _index(), embed, broken).decide("hello")
     assert decision.layer == "fallback"
     assert decision.model == "large"
+
+
+@pytest.mark.asyncio
+async def test_rule_keywords_match_whole_words_only() -> None:
+    async def embed(_: str) -> list[float]:
+        return [1.0, 0.0]
+
+    options = _options(rules=RouterRules(force_large_keywords=["prove", "step by step"]))
+    inside_word = await RouterEngine(options, _index(), embed).decide("How can I improve my essay?")
+    whole_word = await RouterEngine(options, _index(), embed).decide("Prove that the sum is even.")
+    phrase = await RouterEngine(options, _index(), embed).decide("Explain it Step by Step, please.")
+    assert inside_word.layer == "knn"
+    assert (whole_word.layer, whole_word.reason) == ("rules", "keyword 'prove'")
+    assert phrase.layer == "rules"
